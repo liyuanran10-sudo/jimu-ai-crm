@@ -10,6 +10,8 @@ let helpCenterPollTimer = null;
 let activeChatAbortController = null;
 const helpCenterNoticeTimers = new Map();
 const KNOWLEDGE_UPLOAD_LIMIT_BYTES = 500 * 1024 * 1024;
+const CHAT_ATTACHMENT_LIMIT_BYTES = 8 * 1024 * 1024;
+const CHAT_ATTACHMENT_MAX_FILES = 6;
 const IMAGE_JOB_POLL_INTERVAL_MS = 4000;
 const HELP_CENTER_POLL_INTERVAL_MS = 4000;
 
@@ -182,6 +184,7 @@ const state = {
   helpCenterNotices: [],
   helpCenterOpen: false,
   chatSessions: {},
+  chatAttachments: [],
   saveChatSolutionKeyword: "",
   interactionImageDrafts: {}
 };
@@ -190,6 +193,9 @@ app.addEventListener("click", handleClick);
 app.addEventListener("submit", handleSubmit);
 app.addEventListener("input", handleInput);
 app.addEventListener("change", handleChange);
+app.addEventListener("paste", handleAppPaste);
+app.addEventListener("dragover", handleAppDragOver);
+app.addEventListener("drop", handleAppDrop);
 document.addEventListener("click", handleDocumentClick);
 
 init();
@@ -1410,9 +1416,12 @@ function renderAiView() {
         ${isDefaultWorkspace ? renderGlobalHistoryPreview() : ""}
         <form id="chatForm" class="chatComposer">
           <div class="composerShell">
+            ${renderChatAttachmentTray()}
             <textarea name="message" rows="1" placeholder="${isDefaultWorkspace ? "给 AI CRM 一个任务，例如：规划市场部上线节奏，或调用 image2 生成产品视觉图" : "询问这个客户的下一步策略、会议提纲、方案大纲或复盘建议"}"></textarea>
+            <input id="chat-file-input" type="file" multiple hidden>
             <div class="composerMeta">
               <div class="composerQuickTools">
+                <button type="button" data-action="pick-chat-files">添加文件</button>
                 <button class="${state.aiChatPanelOpen && state.aiChatPanelMode === "customer" ? "active" : ""}" type="button" data-action="open-chat-panel" data-mode="customer">${customer ? `客户：${escapeHtml(customer.name)}` : "选择客户"}</button>
                 <button class="${state.aiChatPanelOpen && state.aiChatPanelMode === "skill" ? "active" : ""}" type="button" data-action="open-chat-panel" data-mode="skill">${state.aiSkillId ? `Skill：${escapeHtml(getSkillName(state.aiSkillId))}` : "选择 Skill"}</button>
                 <button class="${state.aiChatPanelOpen && state.aiChatPanelMode === "model" ? "active" : ""}" type="button" data-action="open-chat-panel" data-mode="model">模型</button>
@@ -1427,6 +1436,24 @@ function renderAiView() {
         </form>
       </section>
     </section>
+  `;
+}
+
+function renderChatAttachmentTray() {
+  const attachments = state.chatAttachments || [];
+  if (!attachments.length) {
+    return `<div class="chatAttachmentHint">可粘贴、拖入或添加文件，AI 会把解析文本作为本轮上下文</div>`;
+  }
+  return `
+    <div class="chatAttachmentTray">
+      ${attachments.map((file, index) => `
+        <span class="chatAttachmentChip" title="${escapeAttr(file.fileName || "附件")}">
+          <strong>${escapeHtml(file.fileName || "附件")}</strong>
+          <small>${escapeHtml(formatFileSize(file.size || 0))}</small>
+          <button type="button" data-action="remove-chat-attachment" data-index="${index}" aria-label="移除附件">×</button>
+        </span>
+      `).join("")}
+    </div>
   `;
 }
 
@@ -2814,7 +2841,18 @@ async function handleClick(event) {
   if (action === "clear-chat") {
     const chat = getActiveChat();
     chat.length = 0;
+    state.chatAttachments = [];
     render();
+    return;
+  }
+  if (action === "pick-chat-files") {
+    document.querySelector("#chat-file-input")?.click();
+    return;
+  }
+  if (action === "remove-chat-attachment") {
+    state.chatAttachments.splice(Number(target.dataset.index || 0), 1);
+    render();
+    document.querySelector("#chatForm textarea[name='message']")?.focus();
     return;
   }
   if (action === "use-ai-scene") {
@@ -3038,10 +3076,39 @@ function handleChange(event) {
     queueChatScrollToBottom();
     return;
   }
+  if (target.id === "chat-file-input") {
+    void addChatAttachmentsFromFiles(target.files || []);
+    target.value = "";
+    return;
+  }
   if (target.id === "strategy-stage" && state.modal?.type === "strategy") state.modal.stage = target.value;
   if (["chat-customer", "chat-skill", "strategy-stage"].includes(target.id)) {
     render();
   }
+}
+
+function handleAppPaste(event) {
+  if (state.view !== "ai") return;
+  if (!event.target.closest?.("#chatForm")) return;
+  const files = Array.from(event.clipboardData?.files || []);
+  if (!files.length) return;
+  event.preventDefault();
+  void addChatAttachmentsFromFiles(files);
+}
+
+function handleAppDragOver(event) {
+  if (state.view !== "ai") return;
+  if (!event.dataTransfer?.types?.includes("Files")) return;
+  event.preventDefault();
+}
+
+function handleAppDrop(event) {
+  if (state.view !== "ai") return;
+  if (!event.target.closest?.("#chatForm") && !event.target.closest?.(".chatPanel")) return;
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) return;
+  event.preventDefault();
+  void addChatAttachmentsFromFiles(files);
 }
 
 async function submitLogin(form) {
@@ -3566,6 +3633,38 @@ async function readCustomerUploads(fileList) {
   return readKnowledgeUploads(fileList);
 }
 
+async function addChatAttachmentsFromFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const existing = state.chatAttachments || [];
+  if (existing.length + files.length > CHAT_ATTACHMENT_MAX_FILES) {
+    showToast(`单轮对话最多附加 ${CHAT_ATTACHMENT_MAX_FILES} 个文件`);
+    return;
+  }
+  const totalSize = existing.reduce((sum, file) => sum + Number(file.size || 0), 0)
+    + files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  if (totalSize > CHAT_ATTACHMENT_LIMIT_BYTES) {
+    showToast(`单轮附件总大小不能超过 ${formatFileSize(CHAT_ATTACHMENT_LIMIT_BYTES)}`);
+    return;
+  }
+
+  try {
+    const uploads = await readKnowledgeUploads(files);
+    state.chatAttachments = [
+      ...existing,
+      ...uploads.map((file) => ({
+        ...file,
+        id: `chat_file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      }))
+    ];
+    showToast(`已添加 ${uploads.length} 个文件，本轮对话会自动解析作为上下文`);
+    render();
+    document.querySelector("#chatForm textarea[name='message']")?.focus();
+  } catch (error) {
+    showToast(error.message || "读取文件失败");
+  }
+}
+
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3580,7 +3679,8 @@ function readFileAsBase64(file) {
 
 async function submitChat(form) {
   const message = form.elements.message.value.trim();
-  if (!message) return;
+  const chatAttachments = [...(state.chatAttachments || [])];
+  if (!message && !chatAttachments.length) return;
   if (activeChatAbortController) {
     showToast("上一条回复还在生成中，可以先暂停再发送新消息。");
     return;
@@ -3605,7 +3705,20 @@ async function submitChat(form) {
   const toolMode = state.chatSkillExplicit && !isSimpleMessage
     ? (state.chatToolMode || activeSession.toolMode || inferChatToolMode(message, skillId))
     : inferChatToolMode(message, skillId);
-  const userMessage = { role: "user", content: message, createdAt: new Date().toISOString() };
+  const attachmentSummary = chatAttachments.length
+    ? `\n\n${chatAttachments.map((file) => `> 附件：${file.fileName || "未命名文件"}（${formatFileSize(file.size || 0)}）`).join("\n")}`
+    : "";
+  const userMessage = {
+    role: "user",
+    content: `${message || "请分析附件内容"}${attachmentSummary}`,
+    attachments: chatAttachments.map((file) => ({
+      fileName: file.fileName,
+      fileType: file.fileType,
+      mimeType: file.mimeType,
+      size: file.size
+    })),
+    createdAt: new Date().toISOString()
+  };
   chat.push(userMessage);
   updateChatSessionTitleFromMessage(activeSession, message, customerId);
   updateChatChrome();
@@ -3627,6 +3740,7 @@ async function submitChat(form) {
   };
   chat.push(assistantMessage);
   form.reset();
+  state.chatAttachments = [];
   updateChatMessages();
 
   try {
@@ -3653,7 +3767,8 @@ async function submitChat(form) {
         workspaceMode: customerId ? "customer" : "default_ai_workspace",
         chatSessionId: activeSession.id,
         chatSessionTitle: activeSession.title,
-        chatSessionMode: activeSession.mode
+        chatSessionMode: activeSession.mode,
+        chatAttachments
       },
       saveToCustomer
     }, {

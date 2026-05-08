@@ -6618,6 +6618,55 @@ body {
   box-shadow: none;
 }
 
+.chatAttachmentHint {
+  margin: 0 4px 8px;
+  color: #98a2b3;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chatAttachmentTray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 2px 10px;
+}
+
+.chatAttachmentChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(100%, 280px);
+  min-height: 34px;
+  gap: 8px;
+  border: 1px solid #d8e4f5;
+  border-radius: 8px;
+  padding: 0 8px;
+  background: #f8fbff;
+  color: #344054;
+  font-size: 12px;
+}
+
+.chatAttachmentChip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatAttachmentChip small {
+  flex: 0 0 auto;
+  color: #98a2b3;
+}
+
+.chatAttachmentChip button {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: #667085;
+  font-size: 16px;
+  line-height: 1;
+}
+
 .composerMeta {
   display: flex;
   align-items: center;

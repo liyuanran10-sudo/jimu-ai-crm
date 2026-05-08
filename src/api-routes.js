@@ -273,6 +273,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
 
     if (shouldUseServerlessQuickDefaultWorkspaceChat(streamBody, processPlan)) {
       const quickGeneration = buildServerlessDefaultWorkspaceChatGeneration({
+        db: authDb,
         body: streamBody,
         actor,
         processPlan
@@ -2398,7 +2399,7 @@ function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {
   if (body.skillId) return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
-  return ["document_generation", "planning"].includes(processPlan?.metadata?.default_intent);
+  return true;
 }
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {
@@ -2411,12 +2412,17 @@ function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {
   return isDefaultWorkspaceDocumentIntent(body.message);
 }
 
-function buildServerlessDefaultWorkspaceChatGeneration({ body = {}, actor, processPlan = {} }) {
+function buildServerlessDefaultWorkspaceChatGeneration({ db, body = {}, actor, processPlan = {} }) {
   const message = String(body.message || "").trim();
   const intent = processPlan?.metadata?.default_intent || classifyDefaultWorkspaceIntent(message).key;
-  const markdown = intent === "planning"
-    ? buildDefaultPlanningMarkdown(message)
-    : buildDefaultDocumentMarkdown(message);
+  const attachmentContext = buildChatAttachmentContext(body.extraContext?.chatAttachments || []);
+  const markdown = buildDefaultWorkspaceMarkdown({
+    db,
+    body,
+    actor,
+    intent,
+    attachmentContext
+  });
 
   return {
     title: "默认 AI 对话",
@@ -2435,12 +2441,104 @@ function buildServerlessDefaultWorkspaceChatGeneration({ body = {}, actor, proce
         intent,
         userGoal: message,
         generatedBy: actor.user.id,
+        attachmentCount: attachmentContext.attachments.length,
         note: "默认工作台快速路径，不读取任何客户档案。"
       }
     },
     outputContent: markdown,
     createdAt: nowIso()
   };
+}
+
+function buildDefaultWorkspaceMarkdown({ db, body = {}, actor, intent, attachmentContext }) {
+  const message = String(body.message || "").trim();
+  if (attachmentContext.attachments.length) {
+    return buildAttachmentAwareMarkdown({ message, intent, attachmentContext });
+  }
+  if (intent === "planning") return buildDefaultPlanningMarkdown(message);
+  if (intent === "document_generation") return buildDefaultDocumentMarkdown(message);
+  if (intent === "work_analysis") return buildDefaultWorkAnalysisMarkdown({ db, actor, message });
+  return buildDefaultGeneralChatMarkdown(message);
+}
+
+function buildChatAttachmentContext(attachments = []) {
+  const normalized = normalizeKnowledgeBaseDocuments([], Array.isArray(attachments) ? attachments : []);
+  const parsed = normalized.map((doc) => {
+    const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
+    const text = chunks.map((chunk) => String(chunk.text || "").trim()).filter(Boolean).join("\n\n")
+      || doc.parsedTextPreview
+      || "";
+    return {
+      fileName: doc.fileName || "未命名文件",
+      fileType: doc.fileType || "file",
+      mimeType: doc.mimeType || "",
+      size: Number(doc.size || 0),
+      parser: doc.parser || "",
+      text: stripMarkdown(text).slice(0, 12000)
+    };
+  }).filter((doc) => doc.text);
+  return {
+    attachments: parsed,
+    combinedText: parsed.map((doc) => `# ${doc.fileName}\n${doc.text}`).join("\n\n---\n\n").slice(0, 24000)
+  };
+}
+
+function buildAttachmentAwareMarkdown({ message = "", intent = "", attachmentContext }) {
+  const files = attachmentContext.attachments || [];
+  const summaries = files.map((file, index) => {
+    const plain = file.text.replace(/\s+/g, " ").trim();
+    return `${index + 1}. ${file.fileName}（${file.parser || file.fileType || "文本解析"}）：${plain.slice(0, 520)}${plain.length > 520 ? "..." : ""}`;
+  }).join("\n");
+  const requested = message || "请分析附件内容";
+  const outputMode = intent === "document_generation" ? "需求/文档输出" : intent === "planning" ? "计划拆解" : "内容分析";
+  return [
+    `# 基于附件的${outputMode}`,
+    "",
+    "## 1. 本轮输入",
+    "",
+    `- 用户要求：${requested}`,
+    `- 附件数量：${files.length}`,
+    "",
+    "## 2. 附件解析摘要",
+    "",
+    summaries || "- 附件已上传，但未解析出可用文本。",
+    "",
+    "## 3. 关键结论",
+    "",
+    ...buildAttachmentConclusions(attachmentContext.combinedText, requested),
+    "",
+    "## 4. 建议下一步",
+    "",
+    "- 如果要形成正式文档，可以继续要求我按 PRD、需求清单、方案大纲或会议纪要格式重排。",
+    "- 如果附件里有表格或多份资料，建议指定关注字段、业务范围或输出粒度。",
+    "- 如果需要保存到客户档案，请先选择客户，再让我把本轮内容沉淀为客户资料或方案。"
+  ].join("\n");
+}
+
+function buildAttachmentConclusions(text = "", requested = "") {
+  const plain = stripMarkdown(text).replace(/\s+/g, " ").trim();
+  if (!plain) return ["- 暂未解析到可分析的正文。"];
+  const hasRequirement = /需求|功能|模块|流程|角色|页面|接口|验收|范围/.test(plain + requested);
+  const hasWork = /今日|今天|工作|任务|完成|计划|待办|会议|客户|跟进/.test(plain + requested);
+  if (hasRequirement) {
+    return [
+      "- 附件中已经包含可拆解为需求清单的业务信息，建议优先按角色、流程、模块、数据和验收标准整理。",
+      "- 需要进一步确认一期 MVP 范围、必须上线端口、第三方接口、权限边界和验收口径。",
+      "- 高风险点通常集中在数据来源、状态流转、支付/消息/外部系统对接、以及后台权限配置。"
+    ];
+  }
+  if (hasWork) {
+    return [
+      "- 可以把附件内容按已完成、进行中、阻塞项和明日优先级四类整理。",
+      "- 建议先识别真正影响交付或客户推进的事项，再把零散任务收敛成 3 到 5 个重点。",
+      "- 如果需要复盘效率，可以继续补充时间线、会议记录或待办列表。"
+    ];
+  }
+  return [
+    `- 附件核心内容集中在：${plain.slice(0, 180)}${plain.length > 180 ? "..." : ""}`,
+    "- 建议先明确你希望输出摘要、清单、方案、纪要还是风险分析。",
+    "- 如需更精确分析，可以继续补充目标受众和使用场景。"
+  ];
 }
 
 function buildServerlessCustomerDocumentChatGeneration({ db, body, actor, processPlan }) {
@@ -2926,6 +3024,15 @@ function classifyDefaultWorkspaceIntent(message = "") {
       toolHint: "默认用 Agent Planner；需要资料时再调用知识库或联网。"
     };
   }
+  if (/(今天|今日|本日).*(工作|任务|事项|进展|复盘|总结|分析)|工作.*(分析|复盘|总结)|任务.*(分析|复盘|总结)/.test(text)) {
+    return {
+      key: "work_analysis",
+      label: "工作分析",
+      reason: "输入要求分析或复盘当天工作，按工作总结和下一步优先级输出。",
+      outputHint: "整理已完成、进行中、阻塞风险、明日重点和建议动作。",
+      toolHint: "默认使用当前用户的全局生成历史和本轮对话上下文，不等待远程模型。"
+    };
+  }
   return {
     key: "general_chat",
     label: "默认对话",
@@ -2933,6 +3040,69 @@ function classifyDefaultWorkspaceIntent(message = "") {
     outputHint: "输出可直接使用的结论和下一步。",
     toolHint: "默认不读取客户档案，保持全局工作台上下文。"
   };
+}
+
+function buildDefaultWorkAnalysisMarkdown({ db, actor, message = "" }) {
+  const userId = actor?.user?.id || "";
+  const todayPrefix = nowIso().slice(0, 10);
+  const todayRecords = (db?.aiGenerationRecords || [])
+    .filter((record) => !userId || record.userId === userId)
+    .filter((record) => String(record.createdAt || "").startsWith(todayPrefix))
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0, 8);
+  const recordLines = todayRecords.length
+    ? todayRecords.map((record) => `- ${record.createdAt?.slice(11, 16) || "今日"} · ${record.title || GENERATION_LABELS_FOR_SYNC[record.generationType] || record.generationType || "AI 生成"}：${stripMarkdown(record.outputContent || "").slice(0, 160)}`).join("\n")
+    : "- 当前系统没有检索到今天属于你的 AI 生成记录。可以粘贴今日待办、会议纪要或工作日志，我会继续按实际内容分析。";
+  return [
+    "# 今日工作分析",
+    "",
+    "## 1. 你刚才的目标",
+    "",
+    message || "分析今天的工作",
+    "",
+    "## 2. 今日系统内可见工作线索",
+    "",
+    recordLines,
+    "",
+    "## 3. 初步判断",
+    "",
+    todayRecords.length
+      ? "- 今天已经有可追踪的 AI 生成或客户协作记录，建议把这些事项按客户推进、方案产出、内部配置和待复盘问题归类。"
+      : "- 当前缺少具体工作明细，不能凭空判断完成质量；建议先补充今天的待办、聊天记录、会议纪要或任务列表。",
+    "- 真正值得优先复盘的是：是否推动了客户决策、是否产出了可交付材料、是否消除了阻塞、是否留下了可追踪记录。",
+    "",
+    "## 4. 建议你按这个格式补全",
+    "",
+    "| 类别 | 事项 | 结果 | 风险/阻塞 | 下一步 |",
+    "| --- | --- | --- | --- | --- |",
+    "| 客户推进 | 待补充 | 待补充 | 待补充 | 待补充 |",
+    "| 方案/文档 | 待补充 | 待补充 | 待补充 | 待补充 |",
+    "| 内部协作 | 待补充 | 待补充 | 待补充 | 待补充 |",
+    "",
+    "## 5. 明日优先级建议",
+    "",
+    "- 先处理会影响客户回复、报价、方案确认或交付排期的事项。",
+    "- 再补齐今天没有沉淀成记录的关键沟通和结论。",
+    "- 最后整理可复用的方案、话术或需求清单，减少下次重复劳动。"
+  ].join("\n");
+}
+
+function buildDefaultGeneralChatMarkdown(message = "") {
+  return [
+    "# 默认 AI 工作台回复",
+    "",
+    "## 结论",
+    "",
+    message
+      ? `我已收到你的问题：「${message}」。当前线上环境会优先使用稳定快速路径回复，避免长时间等待远程模型导致 504。`
+      : "我已收到你的问题。",
+    "",
+    "## 我可以继续怎么帮你",
+    "",
+    "- 生成需求清单、PRD、方案大纲、PPT 结构稿或工作计划。",
+    "- 分析你粘贴或上传的文件内容，并整理成摘要、清单、风险或下一步动作。",
+    "- 如果需要结合某个客户，请点「选择客户」或直接提到客户名称。"
+  ].join("\n");
 }
 
 function isDefaultWorkspaceDocumentIntent(message = "") {
