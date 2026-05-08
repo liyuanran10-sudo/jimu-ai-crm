@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>知识同步助手</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header class="popupHeader">
+      <div class="titleRow">
+        <div class="miniMark">K</div>
+        <div>
+          <span>Knowledge Capture</span>
+          <h1>知识同步助手</h1>
+        </div>
+      </div>
+      <button id="reloadSelection" type="button" title="重新读取选中文本">刷新</button>
+    </header>
+
+    <label>
+      选中内容
+      <textarea id="content" rows="8" placeholder="选中的内容会自动出现在这里，也可以手动粘贴"></textarea>
+    </label>
+
+    <label>
+      补充说明
+      <input id="userNote" type="text" placeholder="例如：保存成售前方案">
+    </label>
+
+    <div class="actions">
+      <button id="organizeBtn" type="button">整理</button>
+      <button id="saveBtn" type="button" disabled>保存</button>
+    </div>
+
+    <section id="preview" class="preview" aria-label="预览">
+      <p>先整理内容，再确认保存。</p>
+    </section>
+
+    <p id="message" class="message"></p>
+    <a href="options.html" target="_blank">设置服务地址</a>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

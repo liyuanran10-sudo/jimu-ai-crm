@@ -1,0 +1,80 @@
+services:
+  - type: web
+    name: jimu-ai-crm
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: crm-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: CRM_AUTH_SECRET
+        generateValue: true
+      - key: SYNC_TARGET
+        value: feishu
+      - key: OPENAI_MODEL
+        value: gpt-5.5
+      - key: IMAGE2_MODEL
+        value: gpt-image-2
+      - key: IMAGE2_SIZE
+        value: 1792x1024
+      - key: PPT_SKILL_BASE_URL
+        value: ""
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: IMAGE2_API_KEY
+        sync: false
+      - key: IMAGE2_BASE_URL
+        sync: false
+      - key: FEISHU_APP_ID
+        sync: false
+      - key: FEISHU_APP_SECRET
+        sync: false
+      - key: FEISHU_WIKI_SPACE_ID
+        sync: false
+      - key: FEISHU_WIKI_PARENT_NODE_TOKEN
+        sync: false
+      - key: FEISHU_SITE_URL
+        sync: false
+      - key: FEISHU_WEBHOOK_URL
+        sync: false
+      - key: FEISHU_WEBHOOK_SECRET
+        sync: false
+      - key: FEISHU_CHAT_ID
+        sync: false
+
+  - type: web
+    name: jimu-aicrm-ppt-skill
+    runtime: docker
+    rootDir: ppt-skill-web
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    disk:
+      name: ppt-outputs
+      mountPath: /app/outputs
+      sizeGB: 1
+    envVars:
+      - key: GPT_IMAGE_BACKEND
+        value: openai
+      - key: GPT_IMAGE_CONCURRENCY
+        value: 1
+      - key: GPT_IMAGE_ENDPOINT
+        value: images
+      - key: GPT_IMAGE_MODEL_NAME
+        value: gpt-image-2
+      - key: GPT_IMAGE_SIZE
+        value: 1792x1024
+      - key: GPT_IMAGE_QUALITY
+        value: high
+      - key: PPT_PUBLIC_BASE_URL
+        sync: false
+      - key: IMAGE2_API_KEY
+        sync: false
+      - key: IMAGE2_BASE_URL
+        sync: false

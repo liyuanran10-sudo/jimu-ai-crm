@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>每日汇总与任务</title>
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/summaries.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brandLockup">
+        <div class="brandMark">K</div>
+        <div>
+          <span class="eyebrow">Daily Intelligence</span>
+          <h1>每日汇总与任务</h1>
+          <p>按日期记录知识库采集内容、关键摘要、可复用资产和任务建议。</p>
+        </div>
+      </div>
+      <div class="statusPanel">
+        <span class="statusLabel">操作</span>
+        <div class="summaryActions">
+          <a class="navButton" href="/">同步工作台</a>
+          <label class="dateControl">
+            汇总日期
+            <input id="summaryDate" type="date" aria-label="汇总日期">
+          </label>
+          <button id="generateBtn" type="button">生成所选日期</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="summaryShell">
+      <aside class="summaryListPanel" aria-label="每日汇总列表">
+        <div class="panelHeader">
+          <div>
+            <span class="eyebrow">Timeline</span>
+            <h2>汇总列表</h2>
+          </div>
+          <span class="pill" id="summaryCount">0 天</span>
+        </div>
+        <div id="summaryList" class="summaryList"></div>
+      </aside>
+
+      <section class="summaryDetailPanel" aria-label="每日汇总详情">
+        <div id="detailEmpty" class="detailEmpty">
+          <div class="emptyIcon"></div>
+          <h2>选择一张卡片</h2>
+          <p>这里会展示当天的摘要、任务建议、采集来源和完整汇总。</p>
+        </div>
+
+        <article id="summaryDetail" class="summaryDetail hidden">
+          <div class="detailHeader">
+            <div>
+              <span class="eyebrow">Daily Summary</span>
+              <h2 id="detailTitle"></h2>
+              <p id="detailMeta"></p>
+            </div>
+          </div>
+
+          <div class="metricGrid">
+            <div class="metricCard">
+              <span>采集内容</span>
+              <strong id="metricPages">0</strong>
+            </div>
+            <div class="metricCard">
+              <span>任务建议</span>
+              <strong id="metricTasks">0</strong>
+            </div>
+            <div class="metricCard">
+              <span>可复用资产</span>
+              <strong id="metricAssets">0</strong>
+            </div>
+          </div>
+
+          <section class="detailSection">
+            <h3>任务建议</h3>
+            <div class="taskColumns">
+              <div>
+                <h4>个人提升</h4>
+                <ul id="personalTasks"></ul>
+              </div>
+              <div>
+                <h4>工作推进</h4>
+                <ul id="workTasks"></ul>
+              </div>
+              <div>
+                <h4>公司管理</h4>
+                <ul id="managementTasks"></ul>
+              </div>
+            </div>
+          </section>
+
+          <section class="detailSection">
+            <h3>采集来源</h3>
+            <div id="sourceCards" class="sourceCards"></div>
+          </section>
+
+          <section class="detailSection">
+            <h3>完整汇总</h3>
+            <pre id="markdownDetail" class="markdownDetail"></pre>
+          </section>
+        </article>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+    <script src="/summaries.js"></script>
+  </body>
+</html>

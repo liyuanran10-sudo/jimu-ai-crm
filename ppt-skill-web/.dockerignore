@@ -1,0 +1,9 @@
+node_modules
+.next
+.playwright-cli
+outputs/*
+!outputs/.gitkeep
+tmp
+.env
+.env.local
+.DS_Store

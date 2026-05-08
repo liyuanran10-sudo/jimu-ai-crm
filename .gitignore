@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+!ppt-skill-web/.env.example
+data/*.jsonl
+data/daily-summaries.json
+data/gpt-memory-context.md
+data/crm-db.json
+data/*.bak
+data/*.tmp
+output/
+tmp/
+node_modules/
+.netlify/
+.tools/
+.DS_Store

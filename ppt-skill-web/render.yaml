@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: jimu-aicrm-ppt-skill
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    disk:
+      name: ppt-outputs
+      mountPath: /app/outputs
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: GPT_IMAGE_BACKEND
+        value: openai
+      - key: GPT_IMAGE_CONCURRENCY
+        value: 1
+      - key: GPT_IMAGE_ENDPOINT
+        value: images
+      - key: GPT_IMAGE_MODEL_NAME
+        value: gpt-image-2
+      - key: GPT_IMAGE_SIZE
+        value: 1792x1024
+      - key: GPT_IMAGE_QUALITY
+        value: high
+      - key: PPT_PUBLIC_BASE_URL
+        sync: false
+      - key: IMAGE2_API_KEY
+        sync: false
+      - key: IMAGE2_BASE_URL
+        sync: false
