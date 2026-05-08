@@ -2329,6 +2329,18 @@ function buildChatProcessPlan({ body = {}, db }) {
     };
   }
 
+  if (defaultIntent?.key === "customer_work") {
+    return {
+      metadata,
+      steps: [
+        buildProcessStep("step_1", "Router 意图识别", "识别为客户推进任务", defaultIntent.reason || "输入要求分析当前负责或手上的客户。"),
+        buildProcessStep("step_2", "Planner 任务规划", "规划客户集合分析路径", "确定要比较客户阶段、推进阻塞、失败原因、优先级和下一步动作。"),
+        buildProcessStep("step_3", "Context 上下文关联", "读取 CRM 客户数据", "读取当前用户负责的客户档案、跟进记录、资料解析、客户记忆和历史 AI 输出。"),
+        buildProcessStep("step_4", "Executor/Reflector 输出", "融合客户上下文回答", "输出可直接用于推进的客户判断和行动建议，并校验事实边界。")
+      ]
+    };
+  }
+
   return {
     metadata,
     steps: [
@@ -2455,6 +2467,7 @@ function buildDefaultWorkspaceMarkdown({ db, body = {}, actor, intent, attachmen
   if (attachmentContext.attachments.length) {
     return buildAttachmentAwareMarkdown({ message, intent, attachmentContext });
   }
+  if (intent === "customer_work") return buildDefaultCustomerPortfolioMarkdown({ db, actor, message });
   if (intent === "planning") return buildDefaultPlanningMarkdown(message);
   if (intent === "document_generation") return buildDefaultDocumentMarkdown(message);
   if (intent === "work_analysis") return buildDefaultWorkAnalysisMarkdown({ db, actor, message });
@@ -2990,6 +3003,7 @@ function shouldAskForCustomerSelection(body = {}, referencedCustomer = null) {
   if (shouldRouteToImage2(body, { skills: [] })) return false;
   const text = String(body.message || "");
   if (isDefaultWorkspaceDocumentIntent(text)) return false;
+  if (isDefaultWorkspaceCustomerPortfolioIntent(text)) return false;
   const asksCustomerWork = /(这个客户|该客户|这个线索|该线索|这个商机|该商机|客户.*(跟进|推进|分析|复盘|成交|阶段|报价|下一步)|线索.*(跟进|推进|分析)|商机.*(跟进|推进|分析)|销售下一步|下一步怎么跟进)/.test(text);
   const hasNamedCustomer = /(客户[:：]|公司[:：]|项目[:：]|[\u4e00-\u9fa5A-Za-z0-9]{2,}(公司|项目|系统|平台|科技|集团|门店|学校|医院|工厂))/.test(text);
   return asksCustomerWork && !hasNamedCustomer;
@@ -3004,6 +3018,15 @@ function classifyDefaultWorkspaceIntent(message = "") {
       reason: "输入要求生成需求文档、方案、报告、PPT 结构或可交付文档，不强制要求选择客户。",
       outputHint: "先识别目标文档类型，再补齐背景、目标、范围、功能、流程、风险和待确认事项。",
       toolHint: "默认使用通用 Agent 文档生成能力；如果用户明确要求案例/知识库/联网，再自动补充检索。"
+    };
+  }
+  if (isDefaultWorkspaceCustomerPortfolioIntent(text)) {
+    return {
+      key: "customer_work",
+      label: "客户推进任务",
+      reason: "输入要求分析当前负责或手上的多个客户，需要读取 CRM 客户档案、跟进记录和历史生成。",
+      outputHint: "调取当前用户负责的客户数据，比较推进阻塞、失败原因、优先级和下一步动作。",
+      toolHint: "读取 CRM 客户集合上下文，包含客户档案、跟进记录、资料解析、客户记忆和历史 AI 输出。"
     };
   }
   if (/(跟进|推进|报价|复盘|成交|阶段|客户分析|线索分析|商机分析)/.test(text)) {
@@ -3040,6 +3063,14 @@ function classifyDefaultWorkspaceIntent(message = "") {
     outputHint: "输出可直接使用的结论和下一步。",
     toolHint: "默认不读取客户档案，保持全局工作台上下文。"
   };
+}
+
+function isDefaultWorkspaceCustomerPortfolioIntent(message = "") {
+  const text = String(message || "").trim();
+  if (!text) return false;
+  const mentionsCustomerGroup = /(我的|我手上|手上|当前|现在|名下|负责|这|这些|那几个|两个|2个|几个|所有).{0,10}(客户|线索|商机)|(客户|线索|商机).{0,10}(两个|2个|几个|这些|当前|现在|手上|名下|负责)/.test(text);
+  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么)/.test(text);
+  return mentionsCustomerGroup && asksAnalysis;
 }
 
 function buildDefaultWorkAnalysisMarkdown({ db, actor, message = "" }) {
@@ -3085,6 +3116,188 @@ function buildDefaultWorkAnalysisMarkdown({ db, actor, message = "" }) {
     "- 再补齐今天没有沉淀成记录的关键沟通和结论。",
     "- 最后整理可复用的方案、话术或需求清单，减少下次重复劳动。"
   ].join("\n");
+}
+
+function buildDefaultCustomerPortfolioMarkdown({ db, actor, message = "" }) {
+  const customers = selectDefaultWorkspaceCustomersForAnalysis(db, actor, message);
+  if (!customers.length) {
+    return [
+      "# 客户推进分析",
+      "",
+      "我理解你要分析当前手上的客户，但系统里没有找到归属于你或可用的客户记录。",
+      "",
+      "你可以先创建客户，或直接发客户名称。我会读取客户档案、跟进记录、资料解析和历史 AI 输出后再分析。"
+    ].join("\n");
+  }
+
+  const customerBlocks = customers.map((customer, index) => {
+    const follows = (db.followRecords || [])
+      .filter((item) => item.customerId === customer.id)
+      .sort((a, b) => new Date(b.followTime || b.createdAt || 0) - new Date(a.followTime || a.createdAt || 0))
+      .slice(0, 4);
+    const latestGenerations = (db.aiGenerationRecords || [])
+      .filter((item) => item.customerId === customer.id)
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      .slice(0, 2);
+    const memories = (db.customerMemories || [])
+      .filter((item) => item.customerId === customer.id && item.status !== "disabled")
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+      .slice(0, 2);
+    const files = (db.customerFiles || [])
+      .filter((item) => item.customerId === customer.id && item.parsedText)
+      .slice(0, 2);
+    const stageName = getStageName(db, customer.stage);
+    const stallReasons = inferCustomerStallReasons({ customer, follows, latestGenerations, message });
+    const nextActions = inferCustomerNextActions({ customer, follows, stageName });
+    return [
+      `## ${index + 1}. ${customer.name}`,
+      "",
+      `- 阶段：${stageName}`,
+      `- 状态：${customer.status || "未设置"}`,
+      `- 类型：${customer.customerType || "未设置"}`,
+      `- 成交概率：${customer.dealProbability || "未设置"}`,
+      `- 预算：${customer.budgetInfo || "未确认"}`,
+      `- 决策信息：${customer.decisionInfo || "未确认"}`,
+      `- 当前下一步：${customer.nextAction || "未设置"}`,
+      "",
+      "### 为什么推进慢/可能失败",
+      "",
+      ...stallReasons,
+      "",
+      "### 可用上下文",
+      "",
+      `- 客户需求：${firstNonEmpty([customer.demandDescription, customer.problemToSolve, customer.background]) || "未补充"}`,
+      `- 已知风险：${customer.knownRisks || "未记录"}`,
+      `- 最近跟进：${summarizeRecentFollowRecords(follows) || "暂无跟进记录"}`,
+      `- 客户记忆：${memories.map((item) => stripMarkdown(item.content || item.title || "").slice(0, 180)).filter(Boolean).join("；") || "暂无客户记忆"}`,
+      `- 资料解析：${files.map((file) => `${file.fileName}：${stripMarkdown(file.parsedText || "").slice(0, 180)}`).join("；") || "暂无已解析资料"}`,
+      `- 历史 AI 输出：${latestGenerations.map((item) => `${item.title || GENERATION_LABELS_FOR_SYNC[item.generationType] || "AI 输出"}：${stripMarkdown(item.outputContent || "").slice(0, 180)}`).join("；") || "暂无历史 AI 输出"}`,
+      "",
+      "### 你分别要做什么",
+      "",
+      ...nextActions
+    ].join("\n");
+  });
+
+  return [
+    "# 当前客户推进分析",
+    "",
+    `> 已按你的问题「${message || "分析当前客户"}」读取 CRM 客户数据。本次默认选取 ${customers.length} 个当前最相关客户；如要指定客户，直接输入客户名称即可。`,
+    "",
+    "## 总体判断",
+    "",
+    "- 推进不了通常不是因为缺少 AI 回复，而是客户需求边界、预算/决策链、下一步动作和跟进节奏没有被收敛。",
+    "- 这类问题必须结合客户档案和跟进记录判断，不能只按通用话术回答。",
+    "- 建议每个客户只推进一个最小闭环：确认决策人、确认一期范围、确认预算口径、确认下一次会议目标。",
+    "",
+    ...customerBlocks,
+    "",
+    "## 优先级建议",
+    "",
+    ...buildCustomerPriorityLines(db, customers),
+    "",
+    "## 下一轮你可以直接让我做",
+    "",
+    "- 为每个客户生成一段微信跟进话术。",
+    "- 把其中一个客户转成「前期咨询回应策略报告」。",
+    "- 对两个客户做成交概率、风险和下一步动作表格。"
+  ].join("\n");
+}
+
+function selectDefaultWorkspaceCustomersForAnalysis(db, actor, message = "") {
+  const text = String(message || "");
+  const requestedCount = /两个|2个/.test(text) ? 2 : /三个|3个/.test(text) ? 3 : 2;
+  const includeLost = /(失败|丢单|没成|为什么)/.test(text);
+  const userId = actor?.user?.id || "";
+  const activeStatuses = new Set(["跟进中", "潜在", "活跃", "active", "open", ""]);
+  const scored = (db.customers || [])
+    .filter((customer) => includeLost || activeStatuses.has(String(customer.status || "")) || customer.status !== "失败")
+    .map((customer) => {
+      let score = 0;
+      if (customer.ownerId === userId) score += 30;
+      if (customer.status !== "失败") score += 8;
+      if (customer.stage === "lost") score += includeLost ? 8 : -5;
+      if (customer.nextAction) score += 6;
+      if (customer.lastFollowTime) score += 5;
+      if (customer.demandDescription) score += 4;
+      score += Math.max(0, 5 - daysSince(customer.updatedAt || customer.lastFollowTime || customer.createdAt));
+      return { customer, score };
+    })
+    .sort((a, b) => b.score - a.score || new Date(b.customer.updatedAt || b.customer.createdAt || 0) - new Date(a.customer.updatedAt || a.customer.createdAt || 0));
+  return scored.slice(0, requestedCount).map((item) => item.customer);
+}
+
+function daysSince(value) {
+  const time = new Date(value || 0).getTime();
+  if (!time) return 999;
+  return Math.floor((Date.now() - time) / (24 * 60 * 60 * 1000));
+}
+
+function inferCustomerStallReasons({ customer, follows = [], latestGenerations = [], message = "" }) {
+  const lines = [];
+  const context = [
+    customer.demandDescription,
+    customer.background,
+    customer.problemToSolve,
+    customer.budgetInfo,
+    customer.decisionInfo,
+    customer.knownRisks,
+    customer.nextAction,
+    follows.map((item) => item.content || item.customerFeedback || item.internalJudgement).join("\n"),
+    latestGenerations.map((item) => item.outputContent).join("\n"),
+    message
+  ].filter(Boolean).join("\n");
+  if (!customer.budgetInfo || /没有|待确认|未知|等|不明确/.test(customer.budgetInfo)) {
+    lines.push("- 预算口径没有被确认，客户很难进入报价、排期或立项判断。");
+  }
+  if (!customer.decisionInfo || /老板|负责人|待确认|核心决策/.test(customer.decisionInfo)) {
+    lines.push("- 决策链还不够清楚，需要确认谁拍板、谁使用、谁验收。");
+  }
+  if (/不知道|不明确|长什么样|范围|边界|一期|没立项|未立项/.test(context)) {
+    lines.push("- 需求边界没有收敛，客户有兴趣但还没有形成可执行的一期范围。");
+  }
+  if (!follows.length || daysSince(follows[0]?.followTime || follows[0]?.createdAt) > 7) {
+    lines.push("- 最近跟进记录不足或间隔偏久，推进节奏没有形成连续压力。");
+  }
+  if (/接口|对接|数据|ERP|第三方|资料|支付/.test(context)) {
+    lines.push("- 存在数据、接口或资料确认项，这些会直接影响方案可信度和交付判断。");
+  }
+  if (!lines.length) {
+    lines.push("- 当前没有明显单点阻塞，更像是下一步动作不够具体：需要把沟通目标从“继续聊”改成“确认范围/预算/决策/时间”。");
+  }
+  return lines.slice(0, 4);
+}
+
+function inferCustomerNextActions({ customer, follows = [], stageName = "" }) {
+  const actions = [];
+  if (!customer.budgetInfo || /没有|待确认|未知|等/.test(customer.budgetInfo)) {
+    actions.push("- 先问预算口径：客户希望先看轻量方案、区间报价，还是完整建设报价。");
+  }
+  if (!customer.decisionInfo || /老板|负责人|待确认|核心决策/.test(customer.decisionInfo)) {
+    actions.push("- 再问决策链：下一次沟通要不要把老板/业务负责人/实际使用人拉齐。");
+  }
+  if (/初步|接触|initial/i.test(customer.stage || stageName)) {
+    actions.push("- 当前阶段优先产出一页式方案或前期咨询回应，不要急着进入大而全 PRD。");
+  } else if (/方案|proposal/i.test(customer.stage || stageName)) {
+    actions.push("- 当前阶段要推动客户确认方案边界、验收标准和报价前提。");
+  } else if (/lost|失败/.test(customer.stage || customer.status || "")) {
+    actions.push("- 如果已失败，先复盘失败原因，再判断是否保留后续唤醒机会。");
+  }
+  if (!follows.length) {
+    actions.push("- 补一条跟进记录，把客户原话、判断和下一步时间写清楚。");
+  }
+  actions.push("- 本周只设一个明确推进目标：让客户确认下一次会议议题和需要谁参加。");
+  return actions.slice(0, 4);
+}
+
+function buildCustomerPriorityLines(db, customers = []) {
+  return customers.map((customer, index) => {
+    const stageName = getStageName(db, customer.stage);
+    const risk = (!customer.budgetInfo || /没有|待确认|未知|等/.test(customer.budgetInfo))
+      ? "先补预算/决策"
+      : customer.nextAction || "推进下一次确认";
+    return `- P${index + 1}：${customer.name}（${stageName}）- ${risk}`;
+  });
 }
 
 function buildDefaultGeneralChatMarkdown(message = "") {
