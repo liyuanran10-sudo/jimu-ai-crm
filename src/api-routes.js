@@ -271,6 +271,65 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
     emitProcessStep(send, processPlan.steps[1], "done");
     emitProcessStep(send, processPlan.steps[2], "running");
 
+    if (shouldUseServerlessQuickDefaultWorkspaceChat(streamBody, processPlan)) {
+      const quickGeneration = buildServerlessDefaultWorkspaceChatGeneration({
+        body: streamBody,
+        actor,
+        processPlan
+      });
+      emitProcessStep(send, processPlan.steps[2], "done");
+      emitProcessStep(send, processPlan.steps[3], "running");
+      const result = await withCrmDb((db) => {
+        const record = saveGenerationRecord(db, streamBody, actor, quickGeneration);
+        return { record, memory: null };
+      });
+      emitProcessStep(send, processPlan.steps[3], "done");
+      await streamSseText(quickGeneration.outputContent, send, "answer_delta");
+      send("done", {
+        ok: true,
+        generation: quickGeneration,
+        record: result.record,
+        memory: result.memory,
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          serverless_fast_path: true
+        }
+      });
+      return true;
+    }
+
+    if (shouldUseServerlessQuickCustomerDocumentChat(streamBody, processPlan)) {
+      const quickGeneration = buildServerlessCustomerDocumentChatGeneration({
+        db: authDb,
+        body: streamBody,
+        actor,
+        processPlan
+      });
+      emitProcessStep(send, processPlan.steps[2], "done");
+      emitProcessStep(send, processPlan.steps[3], "running");
+      const result = await withCrmDb((db) => {
+        const record = saveGenerationRecord(db, streamBody, actor, quickGeneration);
+        const memory = saveCustomerMemoryFromGeneration(db, streamBody, actor, quickGeneration, record);
+        saveGenerationToCustomerIfNeeded(db, streamBody, quickGeneration);
+        return { record, memory };
+      });
+      emitProcessStep(send, processPlan.steps[3], "done");
+      await streamSseText(quickGeneration.outputContent, send, "answer_delta");
+      send("done", {
+        ok: true,
+        generation: quickGeneration,
+        record: result.record,
+        memory: result.memory,
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          serverless_fast_path: true
+        }
+      });
+      return true;
+    }
+
     if (shouldUseServerlessQuickCustomerChat(streamBody, processPlan)) {
       const quickGeneration = buildServerlessQuickCustomerChatGeneration({
         db: authDb,
@@ -461,6 +520,15 @@ export async function runImageBackgroundJob({ kind, recordId, body = {}, itemId 
   }
   if (kind === "interaction_image_regenerate") {
     return runInteractionImageRegenerateJob({ recordId, itemId, modification, actorUser, config });
+  }
+  if (kind === "crm_generation") {
+    return runCrmGenerationJob({ recordId, body, actorUser, config });
+  }
+  if (kind === "historical_solution") {
+    return runCustomerHistoricalSolutionJob({ recordId, body, actorUser, config });
+  }
+  if (kind === "report_feedback") {
+    return runReportFeedbackJob({ feedbackId: recordId, body, actorUser, config });
   }
   throw new Error(`Unsupported image background job: ${kind || "unknown"}`);
 }
@@ -1079,6 +1147,19 @@ async function invokeNetlifyImageBackgroundJob({ kind, recordId, body = {}, item
 function queueCrmGenerationJob({ recordId, body, actorUser, config }) {
   const jobBody = cloneJobPayload(body);
   const jobActor = { id: actorUser.id, name: actorUser.name, role: actorUser.role };
+  if (isServerlessRuntime()) {
+    return invokeNetlifyImageBackgroundJob({
+      kind: "crm_generation",
+      recordId,
+      body: jobBody,
+      actorUser: jobActor,
+      config
+    }).catch(async (error) => markCrmGenerationJobFailed({
+      recordId,
+      title: GENERATION_LABELS_FOR_SYNC[body.type] || body.type || "AI 生成",
+      errorText: `提交 Netlify 后台 AI 任务失败：${error.message || "未知错误"}`
+    }));
+  }
   setTimeout(() => {
     void runCrmGenerationJob({ recordId, body: jobBody, actorUser: jobActor, config })
       .catch(async (error) => markCrmGenerationJobFailed({
@@ -1089,11 +1170,25 @@ function queueCrmGenerationJob({ recordId, body, actorUser, config }) {
         console.error("failed to mark crm ai job", redactApiError(markError.message || ""));
       }));
   }, 0);
+  return Promise.resolve(true);
 }
 
 function queueCustomerHistoricalSolutionJob({ recordId, body, actorUser, config }) {
   const jobBody = cloneJobPayload(body);
   const jobActor = { id: actorUser.id, name: actorUser.name, role: actorUser.role };
+  if (isServerlessRuntime()) {
+    return invokeNetlifyImageBackgroundJob({
+      kind: "historical_solution",
+      recordId,
+      body: jobBody,
+      actorUser: jobActor,
+      config
+    }).catch(async (error) => markCrmGenerationJobFailed({
+      recordId,
+      title: "加入历史方案库",
+      errorText: `提交 Netlify 历史方案后台任务失败：${error.message || "未知错误"}`
+    }));
+  }
   setTimeout(() => {
     void runCustomerHistoricalSolutionJob({ recordId, body: jobBody, actorUser: jobActor, config })
       .catch(async (error) => markCrmGenerationJobFailed({
@@ -1104,6 +1199,7 @@ function queueCustomerHistoricalSolutionJob({ recordId, body, actorUser, config 
         console.error("failed to mark historical solution job", redactApiError(markError.message || ""));
       }));
   }, 0);
+  return Promise.resolve(true);
 }
 
 async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
@@ -1196,6 +1292,125 @@ async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
     }
 
     return record;
+  });
+}
+
+async function recoverStuckCrmGenerationJobs({ db, config }) {
+  if (!isServerlessRuntime()) return false;
+  const now = Date.now();
+  const recoverableTypes = new Set([
+    "follow_strategy",
+    "demand_analysis",
+    "proposal_outline",
+    "failure_report",
+    "follow_summary",
+    "chat",
+    "consultation_advice",
+    "next_communication_question_list",
+    "lightweight_solution",
+    "solution_deepening",
+    "historical_solution_entry",
+    "requirement_document",
+    "lightweight_solution_ppt_outline"
+  ]);
+  const stuckRecords = db.aiGenerationRecords
+    .filter((record) => {
+      const job = record.inputContext?.asyncAiJob;
+      if (job?.status !== "generating") return false;
+      if (!recoverableTypes.has(record.generationType)) return false;
+      const startedAt = Date.parse(job.startedAt || record.createdAt || "");
+      if (!Number.isFinite(startedAt)) return false;
+      return now - startedAt > 20 * 1000;
+    })
+    .slice(0, 1);
+
+  if (!stuckRecords.length) return false;
+
+  for (const record of stuckRecords) {
+    await recoverStuckCrmGenerationJob(record, db, config);
+  }
+  return true;
+}
+
+async function recoverStuckCrmGenerationJob(record, db, config) {
+  const customerId = record.customerId || record.inputContext?.customerId || record.inputContext?.asyncAiJob?.customerId || "";
+  const customer = customerId ? db.customers.find((item) => item.id === customerId) : null;
+  const generation = await generateCrmContent({
+    db,
+    type: record.generationType || record.inputContext?.asyncAiJob?.kind || "follow_strategy",
+    customerId,
+    skillId: record.skillId || "",
+    userId: record.userId || record.inputContext?.generatedBy || "system",
+    message: record.inputContext?.message || "",
+    extraContext: {
+      ...(record.inputContext?.extra || {}),
+      recoveredFromServerlessQueue: true,
+      recoveryReason: "Netlify 后台任务未及时写回，轮询时自动生成兜底结果，避免销售端长期卡在生成中。"
+    },
+    modelId: "model_local",
+    config: {
+      ...config,
+      openaiApiKey: ""
+    }
+  });
+  const finishedAt = nowIso();
+
+  await withCrmDb((nextDb) => {
+    const existing = nextDb.aiGenerationRecords.find((item) => item.id === record.id);
+    if (!existing) return null;
+    const saved = upsertCollectionItem(nextDb, "aiGenerationRecords", {
+      ...existing,
+      inputContext: {
+        ...generation.inputContext,
+        asyncAiJob: {
+          ...(existing.inputContext?.asyncAiJob || {}),
+          status: "completed",
+          finishedAt,
+          recovered: true,
+          recoveryNote: "Netlify 后台任务未及时写回，已由 bootstrap 轮询兜底完成。",
+          steps: mergeAsyncJobSteps(existing.inputContext?.asyncAiJob?.steps, [
+            buildAsyncJobStep("read_context", "读取客户上下文", "done", customer ? `已读取 ${customer.name} 的客户上下文。` : "已读取当前上下文。"),
+            buildAsyncJobStep("call_model", "生成兜底结果", "done", "后台任务未及时写回，已生成可用兜底结果。"),
+            buildAsyncJobStep("write_result", "写入生成结果", "done", "已保存到生成历史。")
+          ])
+        }
+      },
+      prompt: generation.prompt,
+      modelName: `${generation.modelName || "本地规则生成"} / 线上兜底`,
+      outputContent: generation.outputContent,
+      title: generation.title || existing.title,
+      updatedAt: finishedAt
+    });
+
+    const actor = {
+      user: nextDb.users.find((user) => user.id === (record.userId || record.inputContext?.generatedBy)) || { id: "system", name: "系统任务", role: "admin" }
+    };
+    saveCustomerMemoryFromGeneration(nextDb, {
+      customerId,
+      userId: record.userId || actor.user.id,
+      type: record.generationType,
+      saveToCustomer: false
+    }, actor, generation, saved);
+
+    if (record.generationType === "follow_summary" && existing.inputContext?.extra?.followRecordId) {
+      const follow = nextDb.followRecords.find((item) => item.id === existing.inputContext.extra.followRecordId);
+      if (follow) {
+        follow.aiSummary = generation.outputContent;
+        follow.updatedAt = finishedAt;
+      }
+    }
+
+    if (record.generationType === "failure_report" && existing.inputContext?.extra?.failureReportId) {
+      const report = nextDb.failureReports.find((item) => item.id === existing.inputContext.extra.failureReportId);
+      if (report) {
+        report.aiReport = generation.outputContent;
+        report.reactivateSuggestion = extractReactivateSuggestion(generation.outputContent || "");
+        report.status = "completed";
+        report.updatedAt = finishedAt;
+      }
+    }
+
+    return saved;
   });
 }
 
@@ -1812,6 +2027,18 @@ function safeJsonParse(text = "") {
 function queueReportFeedbackJob({ feedbackId, body, actorUser, config }) {
   const jobBody = cloneJobPayload(body);
   const jobActor = { id: actorUser.id, name: actorUser.name, role: actorUser.role };
+  if (isServerlessRuntime()) {
+    return invokeNetlifyImageBackgroundJob({
+      kind: "report_feedback",
+      recordId: feedbackId,
+      body: jobBody,
+      actorUser: jobActor,
+      config
+    }).catch(async (error) => markReportFeedbackJobFailed({
+      feedbackId,
+      errorText: `提交 Netlify 报告反馈后台任务失败：${error.message || "未知错误"}`
+    }));
+  }
   setTimeout(() => {
     void runReportFeedbackJob({ feedbackId, body: jobBody, actorUser: jobActor, config })
       .catch(async (error) => markReportFeedbackJobFailed({
@@ -1821,6 +2048,7 @@ function queueReportFeedbackJob({ feedbackId, body, actorUser, config }) {
         console.error("failed to mark report feedback job", redactApiError(markError.message || ""));
       }));
   }, 0);
+  return Promise.resolve(true);
 }
 
 async function runReportFeedbackJob({ feedbackId, body, actorUser, config }) {
@@ -2021,6 +2249,7 @@ function buildChatProcessPlan({ body = {}, db }) {
     : null;
   const usesImage2 = !body.customerId && shouldRouteToImage2(body, db);
   const isSimple = isSimpleChatQuery(message) && !usesImage2;
+  const defaultIntent = classifyDefaultWorkspaceIntent(message);
   const skill = isSimple ? null : rawSkill;
   const usedRag = Boolean(
     /知识库|RAG|资料|案例|方案库|历史方案|文档|切片|检索/.test(message)
@@ -2037,7 +2266,11 @@ function buildChatProcessPlan({ body = {}, db }) {
     referenced_customer_context: Boolean(referencedCustomer),
     referenced_customer_id: referencedCustomer?.id || "",
     referenced_customer_name: referencedCustomer?.name || "",
-    image_job: usesImage2
+    image_job: usesImage2,
+    default_intent: !customer && !referencedCustomer ? defaultIntent?.key || "" : "",
+    default_intent_label: !customer && !referencedCustomer ? defaultIntent?.label || "" : "",
+    customer_intent: customer ? defaultIntent?.key || "" : "",
+    customer_intent_label: customer ? defaultIntent?.label || "" : ""
   };
 
   if (isSimple) {
@@ -2051,10 +2284,10 @@ function buildChatProcessPlan({ body = {}, db }) {
     return {
       metadata,
       steps: [
-        buildProcessStep("step_1", "识别图片生成任务", "已识别为生图请求", "将用户输入整理为 image2 可用的生图任务。"),
-        buildProcessStep("step_2", "整理生图提示词", "正在提炼图片需求", "结合当前输入与默认生图规则生成更稳定的提示词。"),
-        buildProcessStep("step_3", "调用 image2", "已提交图片生成任务", "将提示词交给 image2 云端服务，等待生成结果。"),
-        buildProcessStep("step_4", "返回生成结果", "整理图片结果与说明", "将生成的图片结果、下载入口和后续修改入口返回给前端。")
+        buildProcessStep("step_1", "Router 意图识别", "识别为 image2 生图任务", "将用户输入识别为图片、视觉稿、交互图或产品图生成请求。"),
+        buildProcessStep("step_2", "Planner 任务规划", "规划图片生成路径", "提炼图片用途、画面主题、设备类型、风格、比例和禁止项。"),
+        buildProcessStep("step_3", "Executor 工具执行", "调用 image2 后台任务", "将稳定提示词交给 image2 云端服务，等待生成结果。"),
+        buildProcessStep("step_4", "Reflector 结果整理", "整理图片结果与说明", "返回生成图片、提示词、下载入口和后续修改入口。")
       ]
     };
   }
@@ -2063,10 +2296,10 @@ function buildChatProcessPlan({ body = {}, db }) {
     return {
       metadata,
       steps: [
-        buildProcessStep("step_1", "理解任务", "识别 Skill 任务", customer ? `当前客户：${customer.name}` : "当前是默认 AI 工作台任务。"),
-        buildProcessStep("step_2", customer ? "读取客户上下文" : "读取工作台上下文", customer ? "读取客户基础信息、跟进记录和资料解析内容。" : "读取默认工作台上下文、Skill 和历史生成记录。"),
-        buildProcessStep("step_3", `调用 ${skill.name}`, "执行匹配 Skill", skill.description || "调用匹配 Skill 生成可直接使用的结果。"),
-        buildProcessStep("step_4", "整理最终回答", "输出可复制结果", "将 Skill 输出整理为正文答案，并保留可复用结论。")
+        buildProcessStep("step_1", "Router 意图识别", "识别为 Skill 任务", customer ? `当前客户：${customer.name}` : "当前是默认 AI 工作台任务。"),
+        buildProcessStep("step_2", "Planner 任务规划", "规划 Skill 执行路径", `已匹配 Skill：${skill.name}。`),
+        buildProcessStep("step_3", customer ? "Context 上下文关联" : "Retriever 工作台检索", customer ? "读取客户基础信息、跟进记录、资料解析和客户记忆。" : "读取默认工作台、Skill 配置、知识库命中和全局生成历史。"),
+        buildProcessStep("step_4", "Executor/Reflector 输出", "执行 Skill 并校验结果", skill.description || "调用匹配 Skill 生成可直接使用的结果，并校验输出可执行性。")
       ]
     };
   }
@@ -2075,10 +2308,10 @@ function buildChatProcessPlan({ body = {}, db }) {
     return {
       metadata,
       steps: [
-        buildProcessStep("step_1", "理解任务", "识别默认对话输入", "当前未手动选择客户，但输入命中了客户信息。"),
-        buildProcessStep("step_2", "命中客户记忆", `已命中客户：${referencedCustomer.name}`, "系统只读取该客户的隔离上下文、跟进记录、资料解析和客户记忆，不会混用其他客户。"),
-        buildProcessStep("step_3", "融合客户上下文", "结合客户资料回答", "将默认 Agent 的通用能力与被命中的客户上下文融合。"),
-        buildProcessStep("step_4", "整理最终回答", "输出可直接使用的结果", "正文只保留结论、建议、文档或话术，不展示调试过程。")
+        buildProcessStep("step_1", "Router 意图识别", "识别默认对话输入", "当前未手动选择客户，但输入命中了客户信息。"),
+        buildProcessStep("step_2", "Planner 任务规划", `规划围绕「${referencedCustomer.name}」回答`, "将默认 Agent 的通用能力切换到单一客户隔离上下文。"),
+        buildProcessStep("step_3", "Context 上下文关联", `已命中客户：${referencedCustomer.name}`, "系统只读取该客户的档案、跟进记录、资料解析和客户记忆，不混用其他客户。"),
+        buildProcessStep("step_4", "Executor/Reflector 输出", "融合客户上下文回答", "正文只保留结论、建议、文档或话术，并校验客户事实边界。")
       ]
     };
   }
@@ -2087,10 +2320,10 @@ function buildChatProcessPlan({ body = {}, db }) {
     return {
       metadata,
       steps: [
-        buildProcessStep("step_1", "理解任务", "识别客户问题", `客户：${customer.name} · 阶段：${getStageName(db, customer.stage)}`),
-        buildProcessStep("step_2", "读取客户上下文", "读取资料与跟进记录", "系统会优先使用当前客户的上下文与记忆，保持客户间隔离。"),
-        buildProcessStep("step_3", "分析客户资料", "梳理需求与推进判断", "综合客户资料、跟进记录和已有生成历史，提炼可执行建议。"),
-        buildProcessStep("step_4", "整理最终回答", "输出销售可用内容", "将分析结果整理成可直接用于客户沟通的建议。")
+        buildProcessStep("step_1", "Router 意图识别", "识别客户问题", `客户：${customer.name} · 阶段：${getStageName(db, customer.stage)}`),
+        buildProcessStep("step_2", "Planner 任务规划", "规划客户分析路径", "确定要输出客户判断、推进建议、沟通问题、材料建议或方案文档。"),
+        buildProcessStep("step_3", "Context 上下文关联", "读取资料与跟进记录", "优先使用当前客户的档案、跟进记录、资料解析、生成历史和客户记忆。"),
+        buildProcessStep("step_4", "Executor/Reflector 输出", "输出销售可用内容", "整理成可直接用于客户沟通的建议，并校验客户间记忆隔离。")
       ]
     };
   }
@@ -2098,10 +2331,10 @@ function buildChatProcessPlan({ body = {}, db }) {
   return {
     metadata,
     steps: [
-      buildProcessStep("step_1", "理解任务", "识别输出目标", "识别用户希望我完成的输出类型与目标。"),
-      buildProcessStep("step_2", "规划执行路径", "判断是否需要工具", "根据任务判断是否进入知识库、联网、Skill 或生图流程。"),
-      buildProcessStep("step_3", "调度 Agent 能力", "组织可用能力", "按需调用默认 Agent、RAG、联网或 Skill 结果。"),
-      buildProcessStep("step_4", "整理最终回答", "输出可直接使用的结果", "把过程收束为自然语言答案、表格、文档或下一步动作。")
+      buildProcessStep("step_1", "Router 意图识别", `识别为${defaultIntent?.label || "默认工作台任务"}`, defaultIntent?.reason || "识别用户希望我完成的输出类型与目标。"),
+      buildProcessStep("step_2", "Planner 任务规划", "规划执行路径", defaultIntent?.outputHint || "根据任务判断是否进入知识库、联网、Skill 或生图流程。"),
+      buildProcessStep("step_3", "Scheduler 工具调度", "判断上下文与工具", defaultIntent?.toolHint || "按需调用默认 Agent、RAG、联网或 Skill 结果。"),
+      buildProcessStep("step_4", "Executor/Reflector 输出", "生成并校验最终结果", "把过程收束为自然语言答案、表格、文档或下一步动作，并检查假设、风险和待确认信息。")
     ]
   };
 }
@@ -2155,6 +2388,362 @@ function shouldUseServerlessQuickCustomerChat(body = {}, processPlan = {}) {
   if (processPlan?.metadata?.used_skill || processPlan?.metadata?.used_tool || processPlan?.metadata?.used_rag) return false;
   const message = String(body.message || "").trim();
   return isCustomerQuickAnalysisIntent(message);
+}
+
+function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {}) {
+  if (!isServerlessRuntime()) return false;
+  if (String(body.type || "chat") !== "chat") return false;
+  if (body.customerId) return false;
+  if (body.skillId) return false;
+  if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
+  if (processPlan?.metadata?.image_job) return false;
+  return ["document_generation", "planning"].includes(processPlan?.metadata?.default_intent);
+}
+
+function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {
+  if (!isServerlessRuntime()) return false;
+  if (String(body.type || "chat") !== "chat") return false;
+  if (!body.customerId) return false;
+  if (body.skillId) return false;
+  if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
+  if (processPlan?.metadata?.used_skill || processPlan?.metadata?.image_job) return false;
+  return isDefaultWorkspaceDocumentIntent(body.message);
+}
+
+function buildServerlessDefaultWorkspaceChatGeneration({ body = {}, actor, processPlan = {} }) {
+  const message = String(body.message || "").trim();
+  const intent = processPlan?.metadata?.default_intent || classifyDefaultWorkspaceIntent(message).key;
+  const markdown = intent === "planning"
+    ? buildDefaultPlanningMarkdown(message)
+    : buildDefaultDocumentMarkdown(message);
+
+  return {
+    title: "默认 AI 对话",
+    generationType: "chat",
+    skillId: "",
+    modelName: "AICRM 默认 Agent 快速生成",
+    prompt: "serverless_default_workspace_fast_path",
+    inputContext: {
+      messageType: "ai_response",
+      process: (processPlan.steps || []).map((step) => ({ ...step, status: "done" })),
+      metadata: {
+        ...(processPlan.metadata || {}),
+        serverless_fast_path: true
+      },
+      defaultWorkspace: {
+        intent,
+        userGoal: message,
+        generatedBy: actor.user.id,
+        note: "默认工作台快速路径，不读取任何客户档案。"
+      }
+    },
+    outputContent: markdown,
+    createdAt: nowIso()
+  };
+}
+
+function buildServerlessCustomerDocumentChatGeneration({ db, body, actor, processPlan }) {
+  const customer = db.customers.find((item) => item.id === body.customerId) || null;
+  const follows = customer
+    ? db.followRecords
+      .filter((item) => item.customerId === customer.id)
+      .sort((a, b) => new Date(b.followTime || b.createdAt) - new Date(a.followTime || a.createdAt))
+      .slice(0, 8)
+    : [];
+  const files = customer
+    ? db.customerFiles
+      .filter((item) => item.customerId === customer.id && item.parsedText)
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      .slice(0, 5)
+    : [];
+  const latestGenerations = customer
+    ? db.aiGenerationRecords
+      .filter((item) => item.customerId === customer.id)
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      .slice(0, 4)
+    : [];
+  const markdown = buildCustomerRequirementDocumentMarkdown({
+    db,
+    customer,
+    follows,
+    files,
+    latestGenerations,
+    message: body.message
+  });
+
+  return {
+    title: `${customer?.name || "客户"} - 需求文档`,
+    generationType: "chat",
+    skillId: "",
+    modelName: "AICRM 客户上下文文档生成",
+    prompt: "serverless_customer_document_fast_path",
+    inputContext: {
+      messageType: "ai_response",
+      process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+      metadata: {
+        ...processPlan.metadata,
+        serverless_fast_path: true,
+        document_intent: classifyDefaultWorkspaceIntent(body.message).key
+      },
+      customerDocument: {
+        customerId: customer?.id || "",
+        customerName: customer?.name || "",
+        stage: customer ? getStageName(db, customer.stage) : "",
+        followRecordCount: follows.length,
+        fileCount: files.length,
+        generationCount: latestGenerations.length,
+        generatedBy: actor.user.id
+      }
+    },
+    outputContent: markdown,
+    createdAt: nowIso()
+  };
+}
+
+function buildCustomerRequirementDocumentMarkdown({ db, customer, follows = [], files = [], latestGenerations = [], message = "" }) {
+  const stageName = customer ? getStageName(db, customer.stage) : "未设置阶段";
+  const demand = firstNonEmpty([
+    customer?.demandDescription,
+    customer?.background,
+    files.map((file) => stripMarkdown(file.parsedText || "").slice(0, 220)).join("\n")
+  ]) || "客户需求资料仍需补充，以下按当前客户档案和阶段输出可沟通初稿。";
+  const isQualityInspection = /质检|检测|视觉|摄像头|产线|工厂|制造|MES|异常/i.test([
+    customer?.name,
+    customer?.customerType,
+    customer?.demandDescription,
+    customer?.background,
+    message
+  ].filter(Boolean).join(" "));
+  const modules = isQualityInspection
+    ? [
+      ["数据采集接入", "接入产线摄像头、图片/视频采集、质检工位、MES 或现有业务系统数据。"],
+      ["样本与标注管理", "沉淀合格/缺陷样本、缺陷类型、标注规则、训练集与验证集管理。"],
+      ["AI 质检识别", "按产品、工位、缺陷类型配置检测模型，输出缺陷定位、置信度和判定结果。"],
+      ["异常预警闭环", "对疑似缺陷、连续异常、设备波动进行提醒，并记录处理结果。"],
+      ["质检看板", "展示质检通过率、缺陷分布、工位趋势、批次问题和人工复核结果。"],
+      ["后台管理", "管理账号权限、产品型号、检测规则、工位配置、日志和基础数据。"]
+    ]
+    : [
+      ["业务资料管理", "管理客户业务对象、资料、附件、状态和基础配置。"],
+      ["核心流程处理", "支持业务提交、审核、流转、反馈和结果记录。"],
+      ["AI 辅助分析", "围绕资料总结、风险识别、内容生成、智能问答提供辅助能力。"],
+      ["数据看板", "展示关键指标、进度、状态分布和异常提醒。"],
+      ["后台管理", "管理账号权限、字典配置、操作日志和系统参数。"]
+    ];
+  const followSummary = summarizeRecentFollowRecords(follows) || "- 暂无跟进记录，建议先补充最近一次沟通内容。";
+  const fileSummary = files.length
+    ? files.map((file) => `- ${file.fileName}：${stripMarkdown(file.parsedText || "").slice(0, 260)}`).join("\n")
+    : "- 暂无已解析客户资料。";
+  const generationSummary = latestGenerations.length
+    ? latestGenerations.map((item) => `- ${item.title || item.generationType || "AI 生成"}：${stripMarkdown(item.outputContent || "").slice(0, 180)}`).join("\n")
+    : "- 暂无历史 AI 生成内容。";
+
+  return [
+    `# ${customer?.name || "客户"}需求文档`,
+    "",
+    "## 1. 文档说明",
+    "",
+    "本文档基于当前客户档案、跟进记录、资料解析和历史 AI 生成内容整理，用于内部售前沟通、需求澄清和方案深化。若客户尚未确认范围，本文档应作为 V1 初稿继续向客户核对。",
+    "",
+    "## 2. 客户基础信息",
+    "",
+    `- 客户名称：${customer?.name || "待确认"}`,
+    `- 客户类型：${customer?.customerType || "待确认"}`,
+    `- 客户来源：${customer?.source || "待确认"}`,
+    `- 当前阶段：${stageName}`,
+    `- 当前状态：${customer?.status || "待确认"}`,
+    `- 负责人：${customer?.ownerName || "待确认"}`,
+    `- 预计金额：${customer?.estimatedAmount || "待确认"}`,
+    `- 成交概率：${customer?.dealProbability || "待确认"}`,
+    "",
+    "## 3. 项目背景",
+    "",
+    customer?.background || demand,
+    "",
+    "## 4. 客户原始需求",
+    "",
+    customer?.demandDescription || demand,
+    "",
+    "## 5. 已知业务基础与约束",
+    "",
+    `- 预算情况：${customer?.budgetInfo || "待确认"}`,
+    `- 决策链信息：${customer?.decisionInfo || "待确认"}`,
+    `- 当前风险：${customer?.riskInfo || customer?.knownRisk || "待确认"}`,
+    `- 内部备注：${customer?.internalNotes || "暂无"}`,
+    "",
+    "## 6. 跟进记录摘要",
+    "",
+    followSummary,
+    "",
+    "## 7. 客户资料摘要",
+    "",
+    fileSummary,
+    "",
+    "## 8. 历史 AI 生成参考",
+    "",
+    generationSummary,
+    "",
+    "## 9. 项目目标",
+    "",
+    "- 明确客户当前业务痛点和一期必须落地的核心范围。",
+    `- ${isQualityInspection ? "通过 AI 识别、异常预警和质检数据闭环，降低人工抽检压力并提升质检稳定性。" : "通过系统化建设打通核心业务流程，降低人工沟通和重复处理成本。"}`,
+    "- 建立可持续沉淀的数据基础，为后续模型优化、运营分析和二期扩展提供依据。",
+    "- 控制一期范围，优先交付能验证价值的 MVP。",
+    "",
+    "## 10. 功能需求",
+    "",
+    "| 模块 | 功能范围 |",
+    "| --- | --- |",
+    ...modules.map(([module, scope]) => `| ${module} | ${scope} |`),
+    "",
+    "## 11. AI 融入点",
+    "",
+    isQualityInspection
+      ? "- 缺陷识别：基于图片或视频帧识别缺陷类型、位置和置信度。\n- 异常判断：结合工位、批次、时间趋势判断异常是否需要人工复核。\n- 质检总结：自动汇总缺陷分布、批次问题和改进建议。\n- 知识沉淀：沉淀缺陷样本、处理经验和复盘结论，辅助后续模型迭代。"
+      : "- 资料总结：对客户资料、沟通记录和业务文档做结构化摘要。\n- 智能问答：围绕业务制度、项目资料和历史方案进行检索问答。\n- 内容生成：生成需求分析、方案大纲、沟通话术和跟进计划。\n- 风险提醒：识别范围不清、预算不明、决策链缺失等推进风险。",
+    "",
+    "## 12. MVP 一期范围建议",
+    "",
+    isQualityInspection
+      ? "- 接入 1 到 2 条代表性产线或工位。\n- 聚焦 2 到 4 类高频或高价值缺陷。\n- 完成样本管理、模型检测、人工复核、异常记录和基础看板。\n- 暂不把所有产品型号、全部工位和复杂 MES 深度集成一次性纳入。"
+      : "- 跑通核心业务流程和最关键的数据对象。\n- 完成基础后台、权限、附件、日志和数据看板。\n- AI 能力先接入资料总结、内容生成和风险提示。\n- 暂不把复杂审批、深度 BI 和多系统集成一次性纳入。",
+    "",
+    "## 13. 非功能需求",
+    "",
+    "- 稳定性：关键页面和接口应可长期稳定使用，异常时有明确提示和日志。",
+    "- 安全性：内部账号权限隔离，客户资料和生成内容不得跨客户混用。",
+    "- 可扩展性：阶段、字段、Skill、模型和知识库需要可配置。",
+    "- 可追溯性：跟进记录、AI 生成结果、资料解析和客户记忆需要留痕。",
+    "",
+    "## 14. 待确认问题",
+    "",
+    isQualityInspection
+      ? "- 当前优先检测的产品型号、工位和缺陷类型分别是什么？\n- 是否已有稳定采集的图片/视频样本，样本量和标注质量如何？\n- AI 判定结果是辅助人工复核，还是要直接联动产线动作？\n- MES、摄像头、工控机、看板系统分别由谁负责对接？\n- 一期验收指标是准确率、漏检率、误检率、效率提升，还是成本下降？"
+      : "- 一期必须上线的角色、流程和页面有哪些？\n- 当前已有系统、数据和文档分别是什么状态？\n- 是否需要对接第三方系统、支付、消息、企业微信或飞书？\n- 预算、排期、验收标准和决策人是否已经明确？\n- AI 输出结果是否需要人工审核后才能进入正式档案？",
+    "",
+    "## 15. 下一步建议",
+    "",
+    "- 用本文档与客户进行一次需求核对会议。",
+    "- 会前让客户补充样本资料、业务流程图、现有系统清单和验收指标。",
+    "- 会后输出功能清单、MVP 范围、实施计划和报价边界。",
+    "- 若客户确认方向，再进入方案大纲或售前 PPT 结构生成。"
+  ].join("\n");
+}
+
+function buildDefaultDocumentMarkdown(message = "") {
+  const target = inferDocumentTarget(message);
+  const isMall = /商城|电商|购物|商品|订单|支付|购物车/.test(message);
+  const projectName = isMall ? "商城系统" : target.projectName;
+  const userRoles = isMall
+    ? ["消费者/会员", "商家或运营人员", "平台管理员", "客服人员"]
+    : ["终端用户", "业务人员", "管理员", "运营人员"];
+  const modules = isMall
+    ? [
+      ["用户端", "注册登录、首页推荐、商品搜索、商品详情、购物车、下单支付、订单跟踪、售后申请、会员中心"],
+      ["运营后台", "商品管理、分类管理、订单管理、库存管理、营销活动、优惠券、会员管理、售后处理、数据看板"],
+      ["基础能力", "权限管理、消息通知、支付配置、物流配置、内容配置、操作日志"],
+      ["AI 可选能力", "商品文案生成、智能客服、用户偏好推荐、评论摘要、经营数据分析"]
+    ]
+    : [
+      ["用户端", "注册登录、信息浏览、核心业务提交、状态查看、消息通知、个人中心"],
+      ["业务后台", "数据管理、流程审核、内容配置、用户管理、统计分析"],
+      ["基础能力", "权限管理、附件管理、日志记录、系统配置、消息通知"],
+      ["AI 可选能力", "资料总结、智能问答、内容生成、风险提醒、数据洞察"]
+    ];
+
+  return [
+    `# ${projectName}需求文档`,
+    "",
+    "## 1. 项目背景",
+    "",
+    `${projectName}用于承接线上业务的展示、交易、运营和管理流程。当前需求描述较简略，以下先按通用软件定制项目输出一版可沟通的需求文档初稿，后续可根据业务模式、用户角色、支付/物流/库存边界继续细化。`,
+    "",
+    "## 2. 项目目标",
+    "",
+    "- 建立清晰的用户使用路径，让用户可以完成从浏览、选择、提交到结果查看的完整闭环。",
+    "- 建立运营后台，让内部人员可以管理核心数据、业务状态、内容配置和运营活动。",
+    "- 沉淀订单、用户、商品/内容、售后等关键业务数据，为后续运营分析和 AI 能力接入打基础。",
+    "- 一期优先跑通核心业务闭环，二期再扩展营销、精细化运营和 AI 增强能力。",
+    "",
+    "## 3. 用户角色",
+    "",
+    userRoles.map((role) => `- ${role}`).join("\n"),
+    "",
+    "## 4. 核心业务流程",
+    "",
+    isMall
+      ? "用户进入商城 -> 浏览/搜索商品 -> 查看商品详情 -> 加入购物车或立即购买 -> 提交订单 -> 支付 -> 商家/平台处理订单 -> 物流/履约 -> 用户确认收货 -> 售后/评价。"
+      : "用户进入系统 -> 浏览信息 -> 提交业务请求 -> 后台处理 -> 状态流转 -> 用户查看结果 -> 运营人员沉淀数据并持续优化。",
+    "",
+    "## 5. 功能需求",
+    "",
+    "| 模块 | 功能范围 |",
+    "| --- | --- |",
+    ...modules.map(([module, scope]) => `| ${module} | ${scope} |`),
+    "",
+    "## 6. MVP 一期范围建议",
+    "",
+    "- 用户登录/注册或手机号快捷登录。",
+    `- ${isMall ? "商品列表、商品详情、购物车、下单支付、订单列表。" : "核心信息列表、详情、提交入口、状态查看。"}`,
+    `- ${isMall ? "后台商品管理、订单管理、基础运营配置。" : "后台数据管理、流程处理、用户管理和基础配置。"}`,
+    "- 基础权限、操作日志、消息通知。",
+    "- 数据统计先做基础看板，不建议一期做过复杂的 BI。",
+    "",
+    "## 7. 非功能需求",
+    "",
+    "- 性能：常用页面首屏加载应保持流畅，列表支持分页和条件筛选。",
+    "- 安全：后台必须有账号权限控制，关键操作需要日志留痕。",
+    "- 可扩展：核心业务对象、状态流转、支付/通知/物流等能力应预留扩展点。",
+    "- 可维护：后台配置项、基础字典、内容数据应可视化维护。",
+    "",
+    "## 8. 待确认问题",
+    "",
+    "- 商城是自营、平台招商、多商户，还是单品牌商城？",
+    "- 是否需要微信/支付宝支付、退款、发票、优惠券、积分、会员等级？",
+    "- 是否涉及真实库存、ERP、WMS、物流接口或第三方商品库？",
+    "- 一期是否必须支持小程序、H5、Web 管理后台，还是只做其中一部分？",
+    "- 订单状态、售后规则、发货方式、退款规则分别是什么？",
+    "- 是否需要接入 AI 客服、商品文案生成、推荐或经营分析？",
+    "",
+    "## 9. 下一步建议",
+    "",
+    "- 先确认业务模式和一期端口范围。",
+    "- 再输出一版功能清单和页面结构。",
+    "- 确认支付、物流、库存、售后这些高风险边界。",
+    "- 之后再进入原型、排期和报价。"
+  ].join("\n");
+}
+
+function buildDefaultPlanningMarkdown(message = "") {
+  return [
+    "# 执行规划",
+    "",
+    "## 1. 目标理解",
+    "",
+    `当前目标：${message || "待补充"}`,
+    "",
+    "## 2. 执行阶段",
+    "",
+    "- 阶段一：明确目标、范围、角色和成功标准。",
+    "- 阶段二：梳理核心流程、关键页面、数据对象和系统边界。",
+    "- 阶段三：形成 MVP 范围、任务拆解、排期和风险清单。",
+    "- 阶段四：确认交付物、验收标准和下一步责任人。",
+    "",
+    "## 3. 待确认事项",
+    "",
+    "- 这份规划是给内部执行，还是给客户沟通？",
+    "- 是否已有业务背景、资料、预算和时间要求？",
+    "- 是否需要输出成 PRD、方案大纲、PPT 结构或任务表？"
+  ].join("\n");
+}
+
+function inferDocumentTarget(message = "") {
+  if (/商城|电商|购物|商品/.test(message)) return { projectName: "商城系统" };
+  if (/CRM|客户管理/i.test(message)) return { projectName: "CRM 系统" };
+  if (/知识库|问答|RAG/i.test(message)) return { projectName: "AI 知识库系统" };
+  if (/小程序/.test(message)) return { projectName: "小程序系统" };
+  if (/App|APP|移动端/.test(message)) return { projectName: "移动端应用" };
+  return { projectName: "业务系统" };
 }
 
 function isCustomerQuickAnalysisIntent(message = "") {
@@ -2301,9 +2890,56 @@ function shouldAskForCustomerSelection(body = {}, referencedCustomer = null) {
   if (body.customerId || referencedCustomer || body.skillId) return false;
   if (shouldRouteToImage2(body, { skills: [] })) return false;
   const text = String(body.message || "");
-  const asksCustomerWork = /(这个客户|客户|线索|商机|跟进|推进|需求|方案|报价|复盘|成交|阶段|销售下一步|下一步怎么)/.test(text);
+  if (isDefaultWorkspaceDocumentIntent(text)) return false;
+  const asksCustomerWork = /(这个客户|该客户|这个线索|该线索|这个商机|该商机|客户.*(跟进|推进|分析|复盘|成交|阶段|报价|下一步)|线索.*(跟进|推进|分析)|商机.*(跟进|推进|分析)|销售下一步|下一步怎么跟进)/.test(text);
   const hasNamedCustomer = /(客户[:：]|公司[:：]|项目[:：]|[\u4e00-\u9fa5A-Za-z0-9]{2,}(公司|项目|系统|平台|科技|集团|门店|学校|医院|工厂))/.test(text);
   return asksCustomerWork && !hasNamedCustomer;
+}
+
+function classifyDefaultWorkspaceIntent(message = "") {
+  const text = String(message || "").trim();
+  if (isDefaultWorkspaceDocumentIntent(text)) {
+    return {
+      key: "document_generation",
+      label: "文档生成",
+      reason: "输入要求生成需求文档、方案、报告、PPT 结构或可交付文档，不强制要求选择客户。",
+      outputHint: "先识别目标文档类型，再补齐背景、目标、范围、功能、流程、风险和待确认事项。",
+      toolHint: "默认使用通用 Agent 文档生成能力；如果用户明确要求案例/知识库/联网，再自动补充检索。"
+    };
+  }
+  if (/(跟进|推进|报价|复盘|成交|阶段|客户分析|线索分析|商机分析)/.test(text)) {
+    return {
+      key: "customer_work",
+      label: "客户推进任务",
+      reason: "输入像客户推进或售前协作任务；如果命中客户名称会自动关联客户，否则在必要时提示选择客户。",
+      outputHint: "围绕客户阶段、跟进目标、沟通问题和下一步动作组织回答。",
+      toolHint: "如已选择或命中客户，读取该客户隔离上下文；否则只输出通用打法。"
+    };
+  }
+  if (/(计划|排期|里程碑|任务|流程|工作流|规划)/.test(text)) {
+    return {
+      key: "planning",
+      label: "规划拆解",
+      reason: "输入要求拆解计划、流程或执行路径。",
+      outputHint: "输出目标、阶段、任务清单、风险和验收标准。",
+      toolHint: "默认用 Agent Planner；需要资料时再调用知识库或联网。"
+    };
+  }
+  return {
+    key: "general_chat",
+    label: "默认对话",
+    reason: "未检测到强客户绑定意图，按默认 AI 工作台直接回答。",
+    outputHint: "输出可直接使用的结论和下一步。",
+    toolHint: "默认不读取客户档案，保持全局工作台上下文。"
+  };
+}
+
+function isDefaultWorkspaceDocumentIntent(message = "") {
+  const text = String(message || "").trim();
+  if (!text) return false;
+  const documentTarget = /(需求文档|需求说明|prd|产品需求|功能清单|方案|方案大纲|解决方案|报告|文档|PPT|ppt|结构稿|大纲|计划书|流程图|说明书|模板|话术|提示词)/i;
+  const documentAction = /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/;
+  return documentTarget.test(text) && documentAction.test(text);
 }
 
 function buildCustomerSelectionClarification(db, message = "") {
@@ -2527,7 +3163,9 @@ async function handleCrmApiRequest({ method, pathname, body, headers, config }) 
     const db = await readCrmDb();
     const actor = resolveCrmActor(db, headers, config);
     if (!actor.user) return json(401, { ok: false, error: actor.error });
-    return json(200, { ok: true, db: sanitizeCrmDb(db) });
+    const recovered = await recoverStuckCrmGenerationJobs({ db, config });
+    const nextDb = recovered ? await readCrmDb() : db;
+    return json(200, { ok: true, db: sanitizeCrmDb(nextDb) });
   }
 
   if (pathname === "/api/crm/sync-history-feishu" && method === "POST") {
@@ -2691,7 +3329,7 @@ async function handleCrmApiRequest({ method, pathname, body, headers, config }) 
     });
 
     if (queuedJob) {
-      queueCrmGenerationJob(queuedJob);
+      await queueCrmGenerationJob(queuedJob);
     }
 
     return json(200, { ok: true, ...result });
@@ -2727,7 +3365,7 @@ async function handleCrmApiRequest({ method, pathname, body, headers, config }) 
       createdAt: nowIso()
     }));
 
-    queueReportFeedbackJob({
+    await queueReportFeedbackJob({
       feedbackId: feedback.id,
       body: {
         recordId: sourceRecord.id,
@@ -2798,7 +3436,7 @@ async function handleCrmApiRequest({ method, pathname, body, headers, config }) 
       return { generation, record };
     });
 
-    if (queuedJob) queueCustomerHistoricalSolutionJob(queuedJob);
+    if (queuedJob) await queueCustomerHistoricalSolutionJob(queuedJob);
     return json(200, { ok: true, generation: result.generation, record: result.record });
   }
 
@@ -2908,7 +3546,7 @@ async function handleCrmApiRequest({ method, pathname, body, headers, config }) 
       };
     });
 
-    if (queuedJob) queueCrmGenerationJob(queuedJob);
+    if (queuedJob) await queueCrmGenerationJob(queuedJob);
 
     return json(200, { ok: true, generation: result.generation, record: result.record });
   }
@@ -3376,7 +4014,7 @@ async function handleCrmApiRequest({ method, pathname, body, headers, config }) 
       };
     });
 
-    if (queuedJob) queueCrmGenerationJob(queuedJob);
+    if (queuedJob) await queueCrmGenerationJob(queuedJob);
 
     return json(200, { ok: true, ...result });
   }

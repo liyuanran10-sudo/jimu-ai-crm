@@ -320,6 +320,8 @@ try {
   await writeCrmDb(originalDb);
 }
 
+process.exit(0);
+
 async function check(name, fn) {
   const result = await fn();
   checks.push(name);

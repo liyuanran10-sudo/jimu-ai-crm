@@ -9,6 +9,7 @@ data/crm-db.json
 data/*.bak
 data/*.tmp
 output/
+public/generated/
 tmp/
 node_modules/
 .netlify/

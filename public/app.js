@@ -5248,6 +5248,7 @@ function renderChatProcessPanel(item) {
   const steps = Array.isArray(item.process) ? item.process.filter((step) => step?.id) : [];
   const complexity = item.metadata?.complexity || item.meta?.complexity || "";
   if (!steps.length || complexity === "simple") return "";
+  const intentLabel = item.metadata?.default_intent_label || item.metadata?.referenced_customer_name || "";
   const doneCount = steps.filter((step) => step.status === "done").length;
   const hasFailure = steps.some((step) => step.status === "failed" || step.status === "error");
   const runningStep = steps.find((step) => step.status === "running");
@@ -5255,14 +5256,14 @@ function renderChatProcessPanel(item) {
     ? "任务过程出现异常，可展开查看原因"
     : runningStep
       ? runningStep.summary || "正在执行任务"
-      : `已完成 ${doneCount}/${steps.length} 个步骤`;
+      : `${intentLabel ? `${intentLabel} · ` : ""}已完成 ${doneCount}/${steps.length} 个步骤`;
   return `
     <section class="chatProcessPanel manusProcessPanel" aria-label="任务过程">
-      <details ${item.streaming ? "open" : ""}>
+      <details open>
         <summary>
           <span class="processPanelIcon ${hasFailure ? "failed" : item.streaming ? "running" : "done"}"></span>
           <span>
-            <strong>任务过程</strong>
+            <strong>Agent 任务过程</strong>
             <small>${escapeHtml(subtitle)}</small>
           </span>
         </summary>

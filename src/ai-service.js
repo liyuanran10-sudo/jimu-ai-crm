@@ -1054,6 +1054,10 @@ function detectDefaultAgentIntent({ message, skill, extraContext = {}, webResear
   if (/知识库|rag|资料|文档|案例|引用|检索|向量|切片/.test(text) || knowledgeBase?.used) {
     add("rag_retrieval", "RAG 检索", knowledgeBase?.used ? 0.92 : 0.78, knowledgeBase?.used ? "知识库已经命中相关资料。" : "输入要求引用知识库、资料、文档或案例。");
   }
+  if (/(需求文档|需求说明|prd|产品需求|功能清单|方案大纲|解决方案|报告|PPT|ppt|结构稿|计划书|说明书|文档)/i.test(text)
+    && /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/.test(text)) {
+    add("document_generation", "文档生成", 0.88, "输入要求生成可交付文档，应直接输出完整结构，而不是要求先选择客户。");
+  }
   if (/联网|搜索|最新|市场|竞品|政策|新闻|官网|网页|爬虫/.test(text) || webResearch?.used) {
     add("web_research", "联网调研", webResearch?.used ? 0.88 : 0.72, webResearch?.used ? "联网检索已经执行。" : "输入可能需要最新外部信息。");
   }
@@ -1082,6 +1086,7 @@ function pickAgentSkills(db, intent) {
   if (/task_planning/.test(intentText)) patterns.push("任务", "下一步");
   if (/agent_strategy/.test(intentText)) patterns.push("意图", "策略", "工作流");
   if (/rag_retrieval/.test(intentText)) patterns.push("案例", "需求分析", "方案");
+  if (/document_generation/.test(intentText)) patterns.push("需求文档", "需求分析", "方案大纲", "轻量级方案");
   if (/skill_execution/.test(intentText)) patterns.push("Skill", "提示词");
   if (/image_generation/.test(intentText)) patterns.push("生图", "交互图");
 
@@ -1150,6 +1155,7 @@ function buildAgentPlanSteps(intent) {
     "由 Scheduler 决定是否调用 RAG、联网、Skill 或 image2。"
   ];
   if (intent.intents.some((item) => item.key === "rag_retrieval")) steps.push("执行知识库检索并在回答中标注命中文档。");
+  if (intent.intents.some((item) => item.key === "document_generation")) steps.push("按目标文档类型组织完整正文结构，包括背景、目标、范围、功能、流程、风险和待确认事项。");
   if (intent.intents.some((item) => item.key === "web_research")) steps.push("执行联网检索并标注来源链接和检索时间。");
   if (intent.intents.some((item) => item.key === "image_generation")) steps.push("生成 image2 提示词并把真实图片生成交给后台任务。");
   steps.push("由 Reflector 检查缺失信息、风险、引用和下一步动作。");
