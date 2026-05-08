@@ -2372,7 +2372,8 @@ function buildRuntimeStreamConfig(config = {}, body = {}) {
 function isServerlessRuntime() {
   const cwd = process.cwd();
   return Boolean(
-    process.env.NETLIFY
+    process.env.JIMU_SERVERLESS_RUNTIME
+    || process.env.NETLIFY
     || process.env.AWS_LAMBDA_FUNCTION_NAME
     || process.env.AWS_EXECUTION_ENV
     || cwd.includes("/var/task")
@@ -2937,7 +2938,7 @@ function classifyDefaultWorkspaceIntent(message = "") {
 function isDefaultWorkspaceDocumentIntent(message = "") {
   const text = String(message || "").trim();
   if (!text) return false;
-  const documentTarget = /(需求文档|需求说明|prd|产品需求|功能清单|方案|方案大纲|解决方案|报告|文档|PPT|ppt|结构稿|大纲|计划书|流程图|说明书|模板|话术|提示词)/i;
+  const documentTarget = /(需求文档|需求说明|需求清单|prd|产品需求|功能清单|业务清单|模块清单|方案|方案大纲|解决方案|报告|文档|PPT|ppt|结构稿|大纲|计划书|流程图|说明书|模板|话术|提示词)/i;
   const documentAction = /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/;
   return documentTarget.test(text) && documentAction.test(text);
 }

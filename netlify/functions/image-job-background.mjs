@@ -4,6 +4,8 @@ import { runImageBackgroundJob } from "../../src/api-routes.js";
 
 loadDotEnv(path.resolve(".env"));
 
+process.env.JIMU_SERVERLESS_RUNTIME = process.env.JIMU_SERVERLESS_RUNTIME || "netlify";
+
 export async function handler(event) {
   try {
     const config = getConfig();

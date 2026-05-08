@@ -4,6 +4,8 @@ import { handleApiRequest, handleApiStreamRequest } from "../../src/api-routes.j
 
 loadDotEnv(path.resolve(".env"));
 
+process.env.JIMU_SERVERLESS_RUNTIME = process.env.JIMU_SERVERLESS_RUNTIME || "netlify";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
