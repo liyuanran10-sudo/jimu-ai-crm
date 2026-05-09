@@ -2454,9 +2454,9 @@ function buildRuntimeStreamConfig(config = {}, body = {}, processPlan = {}) {
   const isOpenDocumentTask = !body.customerId && !body.skillId && intent === "document_generation";
   const chatContextMaxChars = Math.min(Number(config.aiContextMaxChars || 16000), isOpenDocumentTask ? 6500 : 9000);
   const chatPromptMaxChars = Math.min(Number(config.aiPromptMaxChars || 22000), isOpenDocumentTask ? 10000 : 14000);
-  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 1800 : 1800);
-  const longReportMaxTokens = Math.min(Number(config.aiLongReportMaxTokens || 6200), isOpenDocumentTask ? 1800 : 3600);
-  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 60000), 60000);
+  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 1800 : 1200);
+  const longReportMaxTokens = Math.min(Number(config.aiLongReportMaxTokens || 6200), isOpenDocumentTask ? 1800 : 2600);
+  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 60000), 24000);
 
   return {
     ...config,
