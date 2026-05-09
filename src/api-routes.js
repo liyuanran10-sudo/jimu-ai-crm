@@ -423,6 +423,67 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return true;
     }
 
+    if (shouldQueueServerlessDefaultGeneralChat(streamBody, processPlan)) {
+      const pendingGeneration = buildPendingBackgroundGeneration({
+        db: authDb,
+        type: "chat",
+        customer: null,
+        skillId: "",
+        userId: actor.user.id,
+        message: streamBody.message,
+        extraContext: streamBody.extraContext,
+        reason: "完整回答已转入后台生成，避免线上同步函数超时。完成后会在帮助中心提醒。"
+      });
+      pendingGeneration.inputContext = {
+        ...(pendingGeneration.inputContext || {}),
+        messageType: "ai_response",
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          background_generation: true
+        }
+      };
+      const result = await withCrmDb((db) => {
+        const record = saveGenerationRecord(db, {
+          ...streamBody,
+          type: "chat",
+          customerId: "",
+          skillId: "",
+          userId: streamBody.userId || actor.user.id,
+          saveToCustomer: false
+        }, actor, pendingGeneration);
+        return { record, memory: null };
+      });
+      emitProcessStep(send, processPlan.steps[2], "done");
+      emitProcessStep(send, processPlan.steps[3], "running");
+      await queueCrmGenerationJob({
+        recordId: result.record.id,
+        body: {
+          ...streamBody,
+          type: "chat",
+          customerId: "",
+          skillId: "",
+          userId: streamBody.userId || actor.user.id
+        },
+        actorUser: actor.user,
+        config
+      });
+      emitProcessStep(send, processPlan.steps[3], "done");
+      await streamSseText(pendingGeneration.outputContent, send, "answer_delta");
+      send("done", {
+        ok: true,
+        generation: pendingGeneration,
+        record: result.record,
+        memory: null,
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          background_generation: true
+        }
+      });
+      return true;
+    }
+
     const streamConfig = buildRuntimeStreamConfig(config, streamBody, processPlan);
     const remoteGenerationType = resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan);
     let streamedAnswer = "";
@@ -2517,6 +2578,16 @@ function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
   return processPlan?.metadata?.default_intent === "document_generation";
+}
+
+function shouldQueueServerlessDefaultGeneralChat(body = {}, processPlan = {}) {
+  if (!isServerlessRuntime()) return false;
+  if (String(body.type || "chat") !== "chat") return false;
+  if (body.customerId) return false;
+  if (body.skillId) return false;
+  if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
+  if (processPlan?.metadata?.image_job) return false;
+  return ["general_chat", "planning", "work_analysis"].includes(processPlan?.metadata?.default_intent);
 }
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {
