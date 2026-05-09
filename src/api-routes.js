@@ -2464,7 +2464,8 @@ function buildRuntimeStreamConfig(config = {}, body = {}, processPlan = {}) {
     aiPromptMaxChars: chatPromptMaxChars,
     aiOutputMaxTokens: chatOutputMaxTokens,
     aiLongReportMaxTokens: longReportMaxTokens,
-    openaiTimeoutMs: chatTimeoutMs
+    openaiTimeoutMs: chatTimeoutMs,
+    disableRemoteStreaming: true
   };
 }
 

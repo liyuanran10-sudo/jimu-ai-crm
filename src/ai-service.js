@@ -1811,6 +1811,14 @@ async function maybeStreamWithRemoteModel({ model, config, prompt, title, genera
 
   if (!apiKey || provider === "local") return null;
 
+  if (config.disableRemoteStreaming) {
+    await onStatus?.("正在等待 AI 生成完整回答...");
+    const output = await maybeGenerateWithRemoteModel({ model, config, prompt, title, generationType });
+    if (isRemoteErrorFallbackText(output)) return output;
+    await streamTextChunks(output || "", onToken);
+    return output;
+  }
+
   if (proxyUrl) {
     await onStatus?.("当前代理链路不支持原生事件流，正在使用分段流降级...");
     const output = await maybeGenerateWithRemoteModel({ model, config, prompt, title, generationType });
