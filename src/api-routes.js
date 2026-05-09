@@ -53,7 +53,7 @@ const GENERATION_LABELS_FOR_SYNC = {
 };
 
 const BACKGROUND_AI_MODEL_NAME = "AI 后台生成中";
-const DEFAULT_BACKGROUND_AI_TIMEOUT_MS = 180 * 1000;
+const DEFAULT_BACKGROUND_AI_TIMEOUT_MS = 60 * 1000;
 const LONG_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
 const PPT_TASK_POLL_INTERVAL_MS = 8000;
 const PPT_TASK_POLL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -357,6 +357,67 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
         metadata: {
           ...processPlan.metadata,
           serverless_fast_path: true
+        }
+      });
+      return true;
+    }
+
+    if (shouldQueueServerlessDefaultDocumentChat(streamBody, processPlan)) {
+      const pendingGeneration = buildPendingBackgroundGeneration({
+        db: authDb,
+        type: "requirement_document",
+        customer: null,
+        skillId: "",
+        userId: actor.user.id,
+        message: streamBody.message,
+        extraContext: streamBody.extraContext,
+        reason: "长文档已转入后台生成，避免 Netlify 同步函数超时。完成后会在帮助中心提醒。"
+      });
+      pendingGeneration.inputContext = {
+        ...(pendingGeneration.inputContext || {}),
+        messageType: "ai_response",
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          background_generation: true
+        }
+      };
+      const result = await withCrmDb((db) => {
+        const record = saveGenerationRecord(db, {
+          ...streamBody,
+          type: "requirement_document",
+          customerId: "",
+          skillId: "",
+          userId: streamBody.userId || actor.user.id,
+          saveToCustomer: false
+        }, actor, pendingGeneration);
+        return { record, memory: null };
+      });
+      emitProcessStep(send, processPlan.steps[2], "done");
+      emitProcessStep(send, processPlan.steps[3], "running");
+      await queueCrmGenerationJob({
+        recordId: result.record.id,
+        body: {
+          ...streamBody,
+          type: "requirement_document",
+          customerId: "",
+          skillId: "",
+          userId: streamBody.userId || actor.user.id
+        },
+        actorUser: actor.user,
+        config
+      });
+      emitProcessStep(send, processPlan.steps[3], "done");
+      await streamSseText(pendingGeneration.outputContent, send, "answer_delta");
+      send("done", {
+        ok: true,
+        generation: pendingGeneration,
+        record: result.record,
+        memory: null,
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          background_generation: true
         }
       });
       return true;
@@ -1124,7 +1185,14 @@ function buildBackgroundImageConfig(config) {
       Number(config.image2TimeoutMs || 0),
       MIN_BACKGROUND_IMAGE_TIMEOUT_MS
     ),
-    image2EditTimeoutMs: Number(config.image2EditTimeoutMs || 90000)
+    image2EditTimeoutMs: Math.max(
+      Number(config.image2EditTimeoutMs || 0),
+      5 * 60 * 1000
+    ),
+    image2PromptTimeoutMs: Math.max(
+      Number(config.image2PromptTimeoutMs || 0),
+      60 * 1000
+    )
   };
 }
 
@@ -2436,6 +2504,16 @@ function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {
   const hasAttachments = Array.isArray(body.extraContext?.chatAttachments) && body.extraContext.chatAttachments.length > 0;
   if (hasAttachments) return true;
   return ["customer_work", "work_analysis"].includes(processPlan?.metadata?.default_intent);
+}
+
+function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {
+  if (!isServerlessRuntime()) return false;
+  if (String(body.type || "chat") !== "chat") return false;
+  if (body.customerId) return false;
+  if (body.skillId) return false;
+  if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
+  if (processPlan?.metadata?.image_job) return false;
+  return processPlan?.metadata?.default_intent === "document_generation";
 }
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {

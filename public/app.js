@@ -3843,7 +3843,7 @@ async function submitChat(form) {
       if (!record?.customerId) state.selectedHistoryId = "";
       if (data.image?.status === "generating" || getRecordJobStatus(record) === "generating") {
         registerImageJob(data.record.id);
-        showToast("图片已进入后台生成队列，完成后会自动通知", 4600);
+        showToast(data.image?.status === "generating" ? "图片已进入后台生成队列，完成后会自动通知" : "AI 长任务已进入后台生成队列，完成后会自动通知", 4600);
       }
     }
     state.chatToolMode = "";

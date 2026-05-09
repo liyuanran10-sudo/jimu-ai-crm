@@ -38,8 +38,8 @@ export function getConfig() {
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openaiModel: process.env.OPENAI_MODEL || "gpt-5.5",
     openaiProxyUrl: process.env.OPENAI_PROXY_URL || "",
-    openaiTimeoutMs: Number(process.env.OPENAI_TIMEOUT_MS || 120000),
-    backgroundAiTimeoutMs: Number(process.env.BACKGROUND_AI_TIMEOUT_MS || 180000),
+    openaiTimeoutMs: Number(process.env.OPENAI_TIMEOUT_MS || 60000),
+    backgroundAiTimeoutMs: Number(process.env.BACKGROUND_AI_TIMEOUT_MS || 60000),
     pptTaskTimeoutMs: Number(process.env.PPT_TASK_TIMEOUT_MS || 1800000),
     aiContextMaxChars: Number(process.env.AI_CONTEXT_MAX_CHARS || 16000),
     aiPromptMaxChars: Number(process.env.AI_PROMPT_MAX_CHARS || 22000),
@@ -53,11 +53,11 @@ export function getConfig() {
     image2EditMode: process.env.IMAGE2_EDIT_MODE || "auto",
     image2Size: process.env.IMAGE2_SIZE || "1792x1024",
     image2ResponseFormat: process.env.IMAGE2_RESPONSE_FORMAT || "",
-    image2TimeoutMs: Number(process.env.IMAGE2_TIMEOUT_MS || 180000),
+    image2TimeoutMs: Number(process.env.IMAGE2_TIMEOUT_MS || 600000),
     image2EditTimeoutMs: process.env.IMAGE2_EDIT_TIMEOUT_MS === undefined
-      ? 90000
-      : Number(process.env.IMAGE2_EDIT_TIMEOUT_MS || 90000),
-    image2PromptTimeoutMs: Number(process.env.IMAGE2_PROMPT_TIMEOUT_MS || 25000),
+      ? 300000
+      : Number(process.env.IMAGE2_EDIT_TIMEOUT_MS || 300000),
+    image2PromptTimeoutMs: Number(process.env.IMAGE2_PROMPT_TIMEOUT_MS || 60000),
     pptSkillBaseUrl: process.env.PPT_SKILL_BASE_URL || (isServerlessRuntime() ? "" : "http://localhost:3100"),
     webResearchEnabled: process.env.WEB_RESEARCH_ENABLED !== "false",
     webSearchProvider: process.env.WEB_SEARCH_PROVIDER || "jina",
