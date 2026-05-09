@@ -1399,7 +1399,8 @@ async function recoverStuckCrmGenerationJobs({ db, config }) {
       if (!recoverableTypes.has(record.generationType)) return false;
       const startedAt = Date.parse(job.startedAt || record.createdAt || "");
       if (!Number.isFinite(startedAt)) return false;
-      return now - startedAt > 20 * 1000;
+      const timeoutMs = Number(job.timeoutMs || getBackgroundAiJobTimeoutMs(job.kind || record.generationType, config));
+      return now - startedAt > Math.max(timeoutMs + 10 * 1000, 60 * 1000);
     })
     .slice(0, 1);
 
