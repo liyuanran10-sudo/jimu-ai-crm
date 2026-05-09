@@ -3180,22 +3180,13 @@ function shouldAskForCustomerSelection(body = {}, referencedCustomer = null) {
   const text = String(body.message || "");
   if (isDefaultWorkspaceDocumentIntent(text)) return false;
   if (isDefaultWorkspaceCustomerPortfolioIntent(text)) return false;
-  const asksCustomerWork = /(这个客户|该客户|这个线索|该线索|这个商机|该商机|客户.*(跟进|推进|分析|复盘|成交|阶段|报价|下一步)|线索.*(跟进|推进|分析)|商机.*(跟进|推进|分析)|销售下一步|下一步怎么跟进)/.test(text);
+  const asksCustomerWork = /(这个客户|该客户|这个线索|该线索|这个商机|该商机|客户.*(跟进|推进|分析|复盘|成交|阶段|报价|下一步|话术|怎么说|发什么)|线索.*(跟进|推进|分析|话术)|商机.*(跟进|推进|分析|话术)|销售下一步|下一步怎么跟进|发什么话术|怎么跟客户说)/.test(text);
   const hasNamedCustomer = /(客户[:：]|公司[:：]|项目[:：]|[\u4e00-\u9fa5A-Za-z0-9]{2,}(公司|项目|系统|平台|科技|集团|门店|学校|医院|工厂))/.test(text);
   return asksCustomerWork && !hasNamedCustomer;
 }
 
 function classifyDefaultWorkspaceIntent(message = "") {
   const text = String(message || "").trim();
-  if (isDefaultWorkspaceDocumentIntent(text)) {
-    return {
-      key: "document_generation",
-      label: "文档生成",
-      reason: "输入要求生成需求文档、方案、报告、PPT 结构或可交付文档，不强制要求选择客户。",
-      outputHint: "先识别目标文档类型，再补齐背景、目标、范围、功能、流程、风险和待确认事项。",
-      toolHint: "默认使用通用 Agent 文档生成能力；如果用户明确要求案例/知识库/联网，再自动补充检索。"
-    };
-  }
   if (isDefaultWorkspaceCustomerPortfolioIntent(text)) {
     return {
       key: "customer_work",
@@ -3205,13 +3196,22 @@ function classifyDefaultWorkspaceIntent(message = "") {
       toolHint: "读取 CRM 客户集合上下文，包含客户档案、跟进记录、资料解析、客户记忆和历史 AI 输出。"
     };
   }
-  if (/(跟进|推进|报价|复盘|成交|阶段|客户分析|线索分析|商机分析)/.test(text)) {
+  if (/(跟进|推进|报价|复盘|成交|阶段|客户分析|线索分析|商机分析|话术|怎么说|发什么|沟通策略)/.test(text)) {
     return {
       key: "customer_work",
       label: "客户推进任务",
       reason: "输入像客户推进或售前协作任务；如果命中客户名称会自动关联客户，否则在必要时提示选择客户。",
       outputHint: "围绕客户阶段、跟进目标、沟通问题和下一步动作组织回答。",
       toolHint: "如已选择或命中客户，读取该客户隔离上下文；否则只输出通用打法。"
+    };
+  }
+  if (isDefaultWorkspaceDocumentIntent(text)) {
+    return {
+      key: "document_generation",
+      label: "文档生成",
+      reason: "输入要求生成需求文档、方案、报告、PPT 结构或可交付文档，不强制要求选择客户。",
+      outputHint: "先识别目标文档类型，再补齐背景、目标、范围、功能、流程、风险和待确认事项。",
+      toolHint: "默认使用通用 Agent 文档生成能力；如果用户明确要求案例/知识库/联网，再自动补充检索。"
     };
   }
   if (/(计划|排期|里程碑|任务|流程|工作流|规划)/.test(text)) {
@@ -3245,7 +3245,7 @@ function isDefaultWorkspaceCustomerPortfolioIntent(message = "") {
   const text = String(message || "").trim();
   if (!text) return false;
   const mentionsCustomerGroup = /(我的|我手上|手上|当前|现在|名下|负责|这|这些|那几个|两个|2个|几个|所有).{0,10}(客户|线索|商机)|(客户|线索|商机).{0,10}(两个|2个|几个|这些|当前|现在|手上|名下|负责)/.test(text);
-  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么)/.test(text);
+  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么|话术|怎么说|发什么|沟通策略)/.test(text);
   return mentionsCustomerGroup && asksAnalysis;
 }
 
