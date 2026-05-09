@@ -426,7 +426,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
     const streamConfig = buildRuntimeStreamConfig(config, streamBody, processPlan);
     const remoteGenerationType = resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan);
     let streamedAnswer = "";
-    const shouldStreamRemoteTokens = processPlan?.metadata?.default_intent !== "document_generation";
+    const shouldStreamRemoteTokens = false;
     const generation = await streamCrmContent({
       db: authDb,
       type: remoteGenerationType,
@@ -2331,7 +2331,7 @@ function buildChatProcessPlan({ body = {}, db }) {
     ? db.customers.find((item) => item.id === body.extraContext.referencedCustomerId) || null
     : null;
   const usesImage2 = !body.customerId && shouldRouteToImage2(body, db);
-  const isSimple = isSimpleChatQuery(message) && !usesImage2;
+  const isSimple = !rawSkill && isSimpleChatQuery(message) && !usesImage2;
   const defaultIntent = classifyDefaultWorkspaceIntent(message);
   const skill = isSimple ? null : rawSkill;
   const usedRag = Boolean(
@@ -2452,11 +2452,11 @@ function buildRuntimeStreamConfig(config = {}, body = {}, processPlan = {}) {
 
   const intent = processPlan?.metadata?.default_intent || "";
   const isOpenDocumentTask = !body.customerId && !body.skillId && intent === "document_generation";
-  const chatContextMaxChars = Math.min(Number(config.aiContextMaxChars || 16000), isOpenDocumentTask ? 6500 : 4500);
-  const chatPromptMaxChars = Math.min(Number(config.aiPromptMaxChars || 22000), isOpenDocumentTask ? 10000 : 6500);
-  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 1800 : 700);
-  const longReportMaxTokens = Math.min(Number(config.aiLongReportMaxTokens || 6200), isOpenDocumentTask ? 1800 : 3200);
-  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 120000), isOpenDocumentTask ? 26000 : 22000);
+  const chatContextMaxChars = Math.min(Number(config.aiContextMaxChars || 16000), isOpenDocumentTask ? 6500 : 9000);
+  const chatPromptMaxChars = Math.min(Number(config.aiPromptMaxChars || 22000), isOpenDocumentTask ? 10000 : 14000);
+  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 1800 : 1800);
+  const longReportMaxTokens = Math.min(Number(config.aiLongReportMaxTokens || 6200), isOpenDocumentTask ? 1800 : 3600);
+  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 60000), 60000);
 
   return {
     ...config,

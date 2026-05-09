@@ -3692,7 +3692,7 @@ async function submitChat(form) {
   const selectedSkillId = state.chatSkillExplicit
     ? (document.querySelector("#chat-skill")?.value || state.aiSkillId || activeSession.skillId || "")
     : "";
-  const skillId = !isSimpleMessage ? selectedSkillId : "";
+  const skillId = state.chatSkillExplicit ? selectedSkillId : (!isSimpleMessage ? selectedSkillId : "");
   const modelId = document.querySelector("#chat-model")?.value || "";
   const customerId = document.querySelector("#chat-customer")?.value || state.aiCustomerId || activeSession.customerId || "";
   const saveToCustomer = Boolean(customerId) && document.querySelector("#chat-save")?.checked !== false;
@@ -3756,13 +3756,13 @@ async function submitChat(form) {
       type: "chat",
       customerId,
       userId: state.user.id,
-      skillId: isSimpleMessage ? "" : skillId,
+      skillId,
       modelId,
       message,
-      toolMode: isSimpleMessage ? "" : toolMode,
+      toolMode: state.chatSkillExplicit ? toolMode : (isSimpleMessage ? "" : toolMode),
       extraContext: {
         conversationHistory,
-        toolMode: isSimpleMessage ? "" : toolMode,
+        toolMode: state.chatSkillExplicit ? toolMode : (isSimpleMessage ? "" : toolMode),
         simpleQuery: isSimpleMessage,
         workspaceMode: customerId ? "customer" : "default_ai_workspace",
         chatSessionId: activeSession.id,

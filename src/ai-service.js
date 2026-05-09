@@ -1970,9 +1970,7 @@ async function streamOpenAiJson({ url, apiKey, body, timeoutMs = DEFAULT_REMOTE_
     })();
     return await Promise.race([requestPromise, timeoutPromise]);
   } catch (error) {
-    if (error?.partialText) {
-      return `${error.partialText.trim()}\n\n> 远程模型仍在继续生成，但当前线上函数已到达安全时间上限；以上为 GPT-5.5 已返回的内容，可继续追问让我补全后续章节。`;
-    }
+    if (error?.partialText) throw new Error(timeoutError);
     if (error?.name === "AbortError") {
       throw new Error(timeoutError);
     }
