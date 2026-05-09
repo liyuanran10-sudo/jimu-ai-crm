@@ -2287,9 +2287,12 @@ function shouldRouteToImage2(body, db) {
 
 function isExplicitImageIntent(message = "") {
   const text = String(message || "");
-  if (/image2|生图|生成图片|画一张|出图/.test(text)) return true;
+  if (/image2|生图/.test(text) && /(生成|画|出|制作|创建|做一张|做个|做一个|帮我|我要|需要)/.test(text)) return true;
+  if (/(生成图片|画一张|出图|做一张图|做个图|做一个图)/.test(text)) return true;
   const visualTarget = /(图片|视觉稿|海报|交互图|界面图|产品图|设计图|UI\s*图|原型图)/i;
   const visualAction = /(生成|画|出|设计|制作|创建|产出|做一张|做个|做一个)/;
+  const knowledgeQuestion = /(是什么|有哪些|几个|多少|区别|怎么选|介绍|解释|了解|关于|模型|能力|价格|额度|恢复|原理|文档|教程|用法|支持)/;
+  if (knowledgeQuestion.test(text) && !/(帮我|给我).{0,8}(生成|画|出|设计|制作|创建)/.test(text)) return false;
   return visualTarget.test(text) && visualAction.test(text);
 }
 
@@ -2502,9 +2505,7 @@ function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {
   if (body.skillId) return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
-  const hasAttachments = Array.isArray(body.extraContext?.chatAttachments) && body.extraContext.chatAttachments.length > 0;
-  if (hasAttachments) return true;
-  return ["customer_work", "work_analysis"].includes(processPlan?.metadata?.default_intent);
+  return processPlan?.metadata?.default_intent === "customer_work";
 }
 
 function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {

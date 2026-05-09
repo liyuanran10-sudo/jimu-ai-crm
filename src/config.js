@@ -39,6 +39,7 @@ export function getConfig() {
     openaiModel: process.env.OPENAI_MODEL || "gpt-5.5",
     openaiProxyUrl: process.env.OPENAI_PROXY_URL || "",
     openaiTimeoutMs: Number(process.env.OPENAI_TIMEOUT_MS || 60000),
+    openaiReasoningEffort: normalizeReasoningEffort(process.env.OPENAI_REASONING_EFFORT || "low"),
     backgroundAiTimeoutMs: Number(process.env.BACKGROUND_AI_TIMEOUT_MS || 60000),
     pptTaskTimeoutMs: Number(process.env.PPT_TASK_TIMEOUT_MS || 1800000),
     aiContextMaxChars: Number(process.env.AI_CONTEXT_MAX_CHARS || 16000),
@@ -80,6 +81,13 @@ export function getConfig() {
     feishuWebhookSecret: process.env.FEISHU_WEBHOOK_SECRET || "",
     feishuChatId: process.env.FEISHU_CHAT_ID || ""
   };
+}
+
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (["low", "medium", "high", "xhigh"].includes(effort)) return effort;
+  if (effort === "minimal" || effort === "none") return "low";
+  return "low";
 }
 
 function isServerlessRuntime() {

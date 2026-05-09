@@ -1064,7 +1064,7 @@ function detectDefaultAgentIntent({ message, skill, extraContext = {}, webResear
   if (/skill|技能|提示词|prompt|模板|复用能力/.test(text) || skill) {
     add("skill_execution", "Skill 执行", skill ? 0.86 : 0.74, skill ? `用户选择或系统匹配 Skill：${skill.name}` : "输入涉及 Skill、提示词或复用能力沉淀。");
   }
-  if (/image2|生图|生成图片|画一张|出图|视觉稿|海报|交互图|界面图|产品图|设计图/.test(text) || extraContext?.toolMode === "image2") {
+  if (extraContext?.toolMode === "image2" || isExplicitImageGenerationRequest(text)) {
     add("image_generation", "image2 生图", 0.9, "输入明确要求生成图片、视觉稿、交互图或设计图。");
   }
   if (!candidates.length) {
@@ -1866,11 +1866,30 @@ function buildRemoteRequestBody({ model, modelId, prompt, generationType, config
   }
   if (String(modelId).toLowerCase().startsWith("gpt-5")) {
     requestBody.reasoning = {
-      effort: String(model?.reasoningEffort || config.openaiReasoningEffort || "minimal")
+      effort: normalizeReasoningEffort(model?.reasoningEffort || config.openaiReasoningEffort || "low")
     };
   }
 
   return requestBody;
+}
+
+function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (["low", "medium", "high", "xhigh"].includes(effort)) return effort;
+  if (effort === "minimal" || effort === "none") return "low";
+  return "low";
+}
+
+function isExplicitImageGenerationRequest(message = "") {
+  const text = String(message || "");
+  if (!text) return false;
+  if (/image2|生图/.test(text) && /(生成|画|出|制作|创建|做一张|做个|做一个|帮我|我要|需要)/.test(text)) return true;
+  if (/(生成图片|画一张|出图|做一张图|做个图|做一个图)/.test(text)) return true;
+  const visualTarget = /(图片|视觉稿|海报|交互图|界面图|产品图|设计图|UI\s*图|原型图)/i;
+  const visualAction = /(生成|画|出|设计|制作|创建|产出|做一张|做个|做一个)/;
+  const knowledgeQuestion = /(是什么|有哪些|几个|多少|区别|怎么选|介绍|解释|了解|关于|模型|能力|价格|额度|恢复|原理|文档|教程|用法|支持)/;
+  if (knowledgeQuestion.test(text) && !/(帮我|给我).{0,8}(生成|画|出|设计|制作|创建)/.test(text)) return false;
+  return visualTarget.test(text) && visualAction.test(text);
 }
 
 function resolveRemoteTimeoutMs(model = {}, config = {}) {
