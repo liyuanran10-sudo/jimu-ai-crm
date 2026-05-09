@@ -362,10 +362,12 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return true;
     }
 
-    const streamConfig = buildRuntimeStreamConfig(config, streamBody);
+    const streamConfig = buildRuntimeStreamConfig(config, streamBody, processPlan);
+    const remoteGenerationType = resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan);
+    let streamedAnswer = "";
     const generation = await streamCrmContent({
       db: authDb,
-      type: streamBody.type || "chat",
+      type: remoteGenerationType,
       customerId: streamBody.customerId || "",
       skillId: streamBody.skillId,
       userId: streamBody.userId || actor.user.id,
@@ -374,7 +376,10 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       modelId: streamBody.modelId,
       config: streamConfig,
       onStatus: () => {},
-      onToken: () => {}
+      onToken: (chunk) => {
+        streamedAnswer += chunk || "";
+        if (chunk) send("answer_delta", { content: chunk });
+      }
     });
     emitProcessStep(send, processPlan.steps[2], "done");
     emitProcessStep(send, processPlan.steps[3], "running");
@@ -398,7 +403,11 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return { record, memory };
     });
     emitProcessStep(send, processPlan.steps[3], "done");
-    await streamSseText(finalAnswer, send, "answer_delta");
+    if (!streamedAnswer) {
+      await streamSseText(finalAnswer, send, "answer_delta");
+    } else if (finalAnswer.startsWith(streamedAnswer) && finalAnswer.length > streamedAnswer.length) {
+      await streamSseText(finalAnswer.slice(streamedAnswer.length), send, "answer_delta");
+    }
 
     send("done", {
       ok: true,
@@ -2363,23 +2372,35 @@ function isSimpleChatQuery(message = "") {
   return false;
 }
 
-function buildRuntimeStreamConfig(config = {}, body = {}) {
+function buildRuntimeStreamConfig(config = {}, body = {}, processPlan = {}) {
   if (!isServerlessRuntime() || String(body.type || "chat") !== "chat") {
     return config;
   }
 
-  const chatContextMaxChars = Math.min(Number(config.aiContextMaxChars || 16000), 4500);
-  const chatPromptMaxChars = Math.min(Number(config.aiPromptMaxChars || 22000), 6500);
-  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), 700);
-  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 120000), 22000);
+  const intent = processPlan?.metadata?.default_intent || "";
+  const isOpenDocumentTask = !body.customerId && !body.skillId && intent === "document_generation";
+  const chatContextMaxChars = Math.min(Number(config.aiContextMaxChars || 16000), isOpenDocumentTask ? 6500 : 4500);
+  const chatPromptMaxChars = Math.min(Number(config.aiPromptMaxChars || 22000), isOpenDocumentTask ? 10000 : 6500);
+  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 1800 : 700);
+  const longReportMaxTokens = Math.min(Number(config.aiLongReportMaxTokens || 6200), isOpenDocumentTask ? 1800 : 3200);
+  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 120000), isOpenDocumentTask ? 26000 : 22000);
 
   return {
     ...config,
     aiContextMaxChars: chatContextMaxChars,
     aiPromptMaxChars: chatPromptMaxChars,
     aiOutputMaxTokens: chatOutputMaxTokens,
+    aiLongReportMaxTokens: longReportMaxTokens,
     openaiTimeoutMs: chatTimeoutMs
   };
+}
+
+function resolveRemoteDefaultWorkspaceGenerationType(body = {}, processPlan = {}) {
+  if (String(body.type || "chat") !== "chat") return body.type || "chat";
+  if (body.customerId || body.skillId) return body.type || "chat";
+  const intent = processPlan?.metadata?.default_intent || "";
+  if (intent === "document_generation") return "requirement_document";
+  return body.type || "chat";
 }
 
 function isServerlessRuntime() {
@@ -2411,7 +2432,9 @@ function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {
   if (body.skillId) return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
-  return true;
+  const hasAttachments = Array.isArray(body.extraContext?.chatAttachments) && body.extraContext.chatAttachments.length > 0;
+  if (hasAttachments) return true;
+  return ["customer_work", "work_analysis"].includes(processPlan?.metadata?.default_intent);
 }
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {

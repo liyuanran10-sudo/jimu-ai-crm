@@ -1758,7 +1758,7 @@ async function maybeGenerateWithRemoteModel({ model, config, prompt, title, gene
   const modelId = model?.modelId || config.openaiModel || "gpt-5.5";
   const baseUrl = (model?.baseUrl || defaultBaseUrlForProvider(provider)).replace(/\/$/, "");
   const proxyUrl = shouldUseOpenAiProxy({ baseUrl, provider, config }) ? config.openaiProxyUrl || "" : "";
-  const timeoutMs = Number(model?.timeoutMs || config.openaiTimeoutMs || DEFAULT_REMOTE_TIMEOUT_MS);
+  const timeoutMs = resolveRemoteTimeoutMs(model, config);
 
   if (!apiKey || provider === "local") return null;
 
@@ -1807,7 +1807,7 @@ async function maybeStreamWithRemoteModel({ model, config, prompt, title, genera
   const modelId = model?.modelId || config.openaiModel || "gpt-5.5";
   const baseUrl = (model?.baseUrl || defaultBaseUrlForProvider(provider)).replace(/\/$/, "");
   const proxyUrl = shouldUseOpenAiProxy({ baseUrl, provider, config }) ? config.openaiProxyUrl || "" : "";
-  const timeoutMs = Number(model?.timeoutMs || config.openaiTimeoutMs || DEFAULT_REMOTE_TIMEOUT_MS);
+  const timeoutMs = resolveRemoteTimeoutMs(model, config);
 
   if (!apiKey || provider === "local") return null;
 
@@ -1864,8 +1864,21 @@ function buildRemoteRequestBody({ model, modelId, prompt, generationType, config
   if (Number.isFinite(temperature) && !String(modelId).toLowerCase().startsWith("gpt-5")) {
     requestBody.temperature = temperature;
   }
+  if (String(modelId).toLowerCase().startsWith("gpt-5")) {
+    requestBody.reasoning = {
+      effort: String(model?.reasoningEffort || config.openaiReasoningEffort || "minimal")
+    };
+  }
 
   return requestBody;
+}
+
+function resolveRemoteTimeoutMs(model = {}, config = {}) {
+  const modelTimeout = Number(model?.timeoutMs || 0);
+  const configTimeout = Number(config.openaiTimeoutMs || 0);
+  const candidates = [modelTimeout, configTimeout].filter((item) => Number.isFinite(item) && item > 0);
+  if (!candidates.length) return DEFAULT_REMOTE_TIMEOUT_MS;
+  return Math.min(...candidates);
 }
 
 function getMaxOutputTokens({ model, generationType, config = {} }) {
@@ -1900,33 +1913,49 @@ function shouldUseOpenAiProxy({ baseUrl = "", provider = "", config = {} }) {
 
 async function streamOpenAiJson({ url, apiKey, body, timeoutMs = DEFAULT_REMOTE_TIMEOUT_MS, onToken, onStatus }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutError = `OpenAI-compatible stream timeout after ${Math.round(timeoutMs / 1000)}s`;
+  const streamState = { text: "" };
+  let timeout;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      const error = new Error(timeoutError);
+      error.partialText = streamState.text;
+      reject(error);
+    }, timeoutMs);
+  });
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream"
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
+    const requestPromise = (async () => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "Accept": "text/event-stream"
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
 
-    if (!response.ok) {
-      const bodyText = await response.text();
-      throw new Error(JSON.stringify({
-        status: response.status,
-        body: safeJsonParse(bodyText) || bodyText
-      }, null, 2));
-    }
-    if (!response.body) throw new Error("Streaming response body is unavailable.");
+      if (!response.ok) {
+        const bodyText = await response.text();
+        throw new Error(JSON.stringify({
+          status: response.status,
+          body: safeJsonParse(bodyText) || bodyText
+        }, null, 2));
+      }
+      if (!response.body) throw new Error("Streaming response body is unavailable.");
 
-    await onStatus?.("AI 正在流式输出...");
-    return readOpenAiEventStream(response.body, onToken);
+      await onStatus?.("AI 正在流式输出...");
+      return readOpenAiEventStream(response.body, onToken, streamState);
+    })();
+    return await Promise.race([requestPromise, timeoutPromise]);
   } catch (error) {
+    if (error?.partialText) {
+      return `${error.partialText.trim()}\n\n> 远程模型仍在继续生成，但当前线上函数已到达安全时间上限；以上为 GPT-5.5 已返回的内容，可继续追问让我补全后续章节。`;
+    }
     if (error?.name === "AbortError") {
-      throw new Error(`OpenAI-compatible stream timeout after ${Math.round(timeoutMs / 1000)}s`);
+      throw new Error(timeoutError);
     }
     throw error;
   } finally {
@@ -1934,7 +1963,7 @@ async function streamOpenAiJson({ url, apiKey, body, timeoutMs = DEFAULT_REMOTE_
   }
 }
 
-async function readOpenAiEventStream(body, onToken) {
+async function readOpenAiEventStream(body, onToken, streamState = null) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1958,11 +1987,15 @@ async function readOpenAiEventStream(body, onToken) {
       const delta = extractStreamDelta(payload);
       if (delta) {
         streamedText += delta;
+        if (streamState) streamState.text = streamedText;
         await onToken?.(delta);
       }
 
       const completedText = extractStreamFinalText(payload);
-      if (completedText) finalText = completedText;
+      if (completedText) {
+        finalText = completedText;
+        if (streamState && !streamState.text) streamState.text = completedText;
+      }
     }
   }
 
@@ -1970,7 +2003,10 @@ async function readOpenAiEventStream(body, onToken) {
     const event = parseSseBlock(buffer);
     const payload = event.data && event.data !== "[DONE]" ? safeJsonParse(event.data) : null;
     const completedText = payload ? extractStreamFinalText(payload) : "";
-    if (completedText) finalText = completedText;
+    if (completedText) {
+      finalText = completedText;
+      if (streamState && !streamState.text) streamState.text = completedText;
+    }
   }
 
   if (finalText && finalText !== streamedText && !streamedText) {
