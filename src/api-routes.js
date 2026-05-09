@@ -365,6 +365,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
     const streamConfig = buildRuntimeStreamConfig(config, streamBody, processPlan);
     const remoteGenerationType = resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan);
     let streamedAnswer = "";
+    const shouldStreamRemoteTokens = processPlan?.metadata?.default_intent !== "document_generation";
     const generation = await streamCrmContent({
       db: authDb,
       type: remoteGenerationType,
@@ -378,7 +379,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       onStatus: () => {},
       onToken: (chunk) => {
         streamedAnswer += chunk || "";
-        if (chunk) send("answer_delta", { content: chunk });
+        if (chunk && shouldStreamRemoteTokens) send("answer_delta", { content: chunk });
       }
     });
     emitProcessStep(send, processPlan.steps[2], "done");
@@ -403,7 +404,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return { record, memory };
     });
     emitProcessStep(send, processPlan.steps[3], "done");
-    if (!streamedAnswer) {
+    if (!streamedAnswer || !shouldStreamRemoteTokens) {
       await streamSseText(finalAnswer, send, "answer_delta");
     } else if (finalAnswer.startsWith(streamedAnswer) && finalAnswer.length > streamedAnswer.length) {
       await streamSseText(finalAnswer.slice(streamedAnswer.length), send, "answer_delta");
@@ -3425,11 +3426,15 @@ function emitProcessStep(send, step, status, overrides = {}) {
 }
 
 function cleanFinalChatAnswer(markdown = "", metadata = {}) {
-  const text = String(markdown || "").replace(/\r\n?/g, "\n").trim();
+  let text = String(markdown || "").replace(/\r\n?/g, "\n").trim();
   if (!text) {
     return metadata?.complexity === "simple"
       ? "我在，你可以继续告诉我下一步要做什么。"
       : "本次生成完成，但没有可展示的正文内容。你可以点击重新生成，或者补充更明确的目标后再试。";
+  }
+
+  if (metadata?.default_intent === "document_generation") {
+    text = stripLeadingDocumentMetaBlock(text);
   }
 
   const bannedHeadingNames = new Set([
@@ -3509,6 +3514,26 @@ function cleanFinalChatAnswer(markdown = "", metadata = {}) {
   }
 
   return cleaned;
+}
+
+function stripLeadingDocumentMetaBlock(markdown = "") {
+  const lines = String(markdown || "").split("\n");
+  if (!lines[0]?.startsWith("# ")) return markdown;
+  let index = 1;
+  while (index < lines.length && lines[index].trim() === "") index += 1;
+  const metaStart = index;
+  if (!lines[index]?.trim().startsWith(">")) return markdown;
+  while (index < lines.length) {
+    const trimmed = lines[index].trim();
+    if (trimmed === "---") {
+      index += 1;
+      break;
+    }
+    if (trimmed && !trimmed.startsWith(">")) break;
+    index += 1;
+  }
+  while (index < lines.length && lines[index].trim() === "") index += 1;
+  return [lines[0], "", ...lines.slice(index)].join("\n").trim() || lines.slice(0, metaStart).join("\n").trim() || markdown;
 }
 
 async function streamSseText(text = "", send, eventName = "delta") {
