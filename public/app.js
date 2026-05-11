@@ -315,7 +315,7 @@ function renderLogin() {
   app.innerHTML = `
     <section class="loginHero">
       <div class="loginBrand">
-        <div class="brandMark">积</div>
+        <img class="brandLogo brandLogo--wordmark" src="/logo.png" alt="积木创意" draggable="false">
         <span>Jimu AI CRM</span>
       </div>
       <h1>把客户跟进、售前方案和失败复盘沉淀成团队能力</h1>
@@ -358,7 +358,7 @@ function renderSidebar() {
   return `
     <aside class="sidebar">
       <div class="sidebarBrand">
-        <div class="brandMark small">AI</div>
+        <img class="brandLogo brandLogo--icon" src="/logo-icon.png" alt="" aria-hidden="true" draggable="false">
         <div>
           <strong>Jimu AI CRM</strong>
           <span>积木科技</span>
