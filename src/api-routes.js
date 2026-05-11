@@ -5705,7 +5705,7 @@ function getBackgroundAiJobTimeoutMs(type = "", config = {}) {
   if (generationType === "lightweight_solution_ppt") {
     return Math.max(Number(config.pptTaskTimeoutMs || 0), PPT_TASK_POLL_TIMEOUT_MS);
   }
-  if (["historical_solution_entry", "consultation_advice", "solution_deepening", "lightweight_solution", "requirement_document"].includes(generationType)) {
+  if (["chat", "historical_solution_entry", "consultation_advice", "solution_deepening", "lightweight_solution", "requirement_document"].includes(generationType)) {
     return Math.max(Number(config.backgroundAiTimeoutMs || 0), LONG_BACKGROUND_AI_TIMEOUT_MS);
   }
   return Math.max(Number(config.backgroundAiTimeoutMs || 0), DEFAULT_BACKGROUND_AI_TIMEOUT_MS);
