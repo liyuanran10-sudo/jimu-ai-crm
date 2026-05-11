@@ -10,6 +10,43 @@
   margin-top: 0;
 }
 
+.topbar {
+  flex-wrap: wrap;
+  gap: 18px 24px;
+}
+
+.brandLockup {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1 1 420px;
+}
+
+.brandLockup > div {
+  min-width: 0;
+}
+
+.brandLockup .brandLogo--wordmark {
+  width: auto;
+  height: 52px;
+}
+
+.statusPanel {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  margin-left: auto;
+}
+
+.statusLabel {
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .dateControl {
   display: grid;
   gap: 4px;
@@ -287,6 +324,19 @@ li {
 }
 
 @media (max-width: 720px) {
+  .brandLockup {
+    flex-basis: 100%;
+  }
+
+  .brandLockup .brandLogo--wordmark {
+    height: 46px;
+  }
+
+  .statusPanel {
+    width: 100%;
+    justify-items: stretch;
+  }
+
   .summaryActions {
     align-items: stretch;
     display: grid;

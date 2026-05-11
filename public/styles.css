@@ -11582,3 +11582,35 @@ textarea:focus {
     overflow: auto !important;
   }
 }
+
+/* Company logo placements */
+.bootLogo,
+.brandLogo {
+  display: block;
+  flex: 0 0 auto;
+  max-width: 100%;
+  object-fit: contain;
+  object-position: center;
+  user-select: none;
+  pointer-events: none;
+}
+
+.bootLogo {
+  width: 58px;
+  height: 58px;
+}
+
+.loginBrand {
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.loginBrand .brandLogo--wordmark {
+  height: 52px;
+  width: auto;
+}
+
+.sidebarBrand .brandLogo--icon {
+  width: 42px;
+  height: 42px;
+}
