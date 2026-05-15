@@ -7733,13 +7733,93 @@ body {
 
 .chatProcessPanel > details > summary {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   min-height: 40px;
   padding: 0 12px;
   cursor: pointer;
   list-style: none;
+}
+
+.processProgressValue {
+  min-width: 44px;
+  border: 1px solid rgba(216, 226, 240, 0.88);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #ffffff;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.agentTraceBar {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid rgba(226, 232, 240, 0.78);
+  padding: 10px 12px 8px 30px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.agentTraceChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agentTraceChips span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-height: 26px;
+  border: 1px solid rgba(216, 226, 240, 0.9);
+  border-radius: 999px;
+  padding: 0 9px;
+  background: #ffffff;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.agentTraceChips b {
+  color: #98a2b3;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.agentTraceProgress {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(28px, 1fr));
+  gap: 5px;
+}
+
+.agentTraceProgress i {
+  height: 4px;
+  border-radius: 999px;
+  background: #e4e7ec;
+}
+
+.agentTraceProgress i.running {
+  background: #1763f3;
+  box-shadow: 0 0 0 3px rgba(23, 99, 243, 0.1);
+}
+
+.agentTraceProgress i.done {
+  background: #12b76a;
+}
+
+.agentTraceProgress i.failed,
+.agentTraceProgress i.error {
+  background: #f04438;
+}
+
+.agentTraceBar p {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .chatProcessPanel > details > summary::-webkit-details-marker,
@@ -7841,13 +7921,38 @@ body {
 
 .processStep > summary {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr);
+  grid-template-columns: 12px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   min-height: 36px;
   padding: 0 10px;
   cursor: pointer;
   list-style: none;
+}
+
+.processStepStatus {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #f2f4f7;
+  color: #667085;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.processStep.running .processStepStatus {
+  background: #eef5ff;
+  color: #1763f3;
+}
+
+.processStep.done .processStepStatus {
+  background: #ecfdf3;
+  color: #039855;
+}
+
+.processStep.failed .processStepStatus,
+.processStep.error .processStepStatus {
+  background: #fef3f2;
+  color: #d92d20;
 }
 
 .processStepDetail {
@@ -11270,12 +11375,48 @@ textarea:focus {
 
 .doubaoChatLayout .manusProcessPanel > details > summary {
   display: grid !important;
-  grid-template-columns: 12px minmax(0, 1fr) !important;
+  grid-template-columns: 12px minmax(0, 1fr) auto auto !important;
   gap: 10px !important;
   min-height: 46px !important;
   padding: 0 14px !important;
   cursor: pointer !important;
   user-select: none !important;
+}
+
+.doubaoChatLayout .manusProcessPanel .processProgressValue {
+  min-width: 46px !important;
+  border-color: rgba(216, 226, 240, 0.9) !important;
+  background: #ffffff !important;
+  color: #667085 !important;
+  font-size: 11px !important;
+  font-weight: 900 !important;
+}
+
+.doubaoChatLayout .manusProcessPanel .agentTraceBar {
+  border-top: 1px solid rgba(226, 232, 240, 0.82) !important;
+  padding: 11px 14px 9px 36px !important;
+  background: rgba(248, 250, 252, 0.58) !important;
+}
+
+.doubaoChatLayout .manusProcessPanel .agentTraceChips span {
+  min-height: 26px !important;
+  border-color: rgba(216, 226, 240, 0.92) !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  color: #475467 !important;
+  font-size: 11px !important;
+  font-weight: 820 !important;
+}
+
+.doubaoChatLayout .manusProcessPanel .agentTraceChips b {
+  color: #98a2b3 !important;
+  font-size: 10px !important;
+}
+
+.doubaoChatLayout .manusProcessPanel .agentTraceBar p {
+  color: #667085 !important;
+  font-size: 12px !important;
+  line-height: 1.6 !important;
 }
 
 .doubaoChatLayout .manusProcessPanel > details > summary::after {
@@ -11324,8 +11465,16 @@ textarea:focus {
 }
 
 .doubaoChatLayout .manusProcessPanel .processStep > summary {
+  grid-template-columns: 12px minmax(0, 1fr) auto !important;
   min-height: 38px !important;
   padding: 0 11px !important;
+}
+
+.doubaoChatLayout .manusProcessPanel .processStepStatus {
+  border-radius: 999px !important;
+  padding: 3px 7px !important;
+  font-size: 10px !important;
+  font-weight: 900 !important;
 }
 
 .doubaoChatLayout .manusProcessPanel .processStepDetail {

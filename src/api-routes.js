@@ -6,6 +6,7 @@ import { createNotionPage } from "./notion.js";
 import { createFeishuPage, isFeishuConfigured } from "./feishu.js";
 import { buildDailySummaryRecord, readDailySummaryHistory, saveDailySummaryRecord } from "./daily-summary.js";
 import { normalizeKnowledgeBaseDocuments } from "./rag-service.js";
+import { buildAgentDecision, mergeAgentDecisionIntoProcessPlan } from "./agent/runtime.js";
 import {
   deleteCollectionItem,
   getStageName,
@@ -53,7 +54,7 @@ const GENERATION_LABELS_FOR_SYNC = {
 };
 
 const BACKGROUND_AI_MODEL_NAME = "AI 后台生成中";
-const DEFAULT_BACKGROUND_AI_TIMEOUT_MS = 60 * 1000;
+const DEFAULT_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
 const LONG_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
 const PPT_TASK_POLL_INTERVAL_MS = 8000;
 const PPT_TASK_POLL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -218,7 +219,10 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       });
       return true;
     }
-    const processPlan = buildChatProcessPlan({ body: streamBody, db: authDb });
+    const processPlan = mergeAgentDecisionIntoProcessPlan(
+      buildChatProcessPlan({ body: streamBody, db: authDb }),
+      buildAgentDecision({ body: streamBody, db: authDb, user: actor.user })
+    );
     if (processPlan.metadata.complexity === "simple") {
       const simpleAnswer = buildSimpleChatAnswer(streamBody, authDb);
       await streamSseText(simpleAnswer, send, "answer_delta");
@@ -246,6 +250,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return true;
     }
 
+    emitAgentDecision(send, processPlan);
     emitProcessStep(send, processPlan.steps[0], "running");
     emitProcessStep(send, processPlan.steps[0], "done");
     emitProcessStep(send, processPlan.steps[1], "running");
@@ -2573,9 +2578,9 @@ function buildRuntimeStreamConfig(config = {}, body = {}, processPlan = {}) {
   const isOpenDocumentTask = !body.customerId && !body.skillId && intent === "document_generation";
   const chatContextMaxChars = Math.min(Number(config.aiContextMaxChars || 16000), isOpenDocumentTask ? 6500 : 9000);
   const chatPromptMaxChars = Math.min(Number(config.aiPromptMaxChars || 22000), isOpenDocumentTask ? 10000 : 14000);
-  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 1800 : 1200);
+  const chatOutputMaxTokens = Math.min(Number(config.aiOutputMaxTokens || 2800), isOpenDocumentTask ? 2400 : 1800);
   const longReportMaxTokens = Math.min(Number(config.aiLongReportMaxTokens || 6200), isOpenDocumentTask ? 1800 : 2600);
-  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 60000), 24000);
+  const chatTimeoutMs = Math.min(Number(config.openaiTimeoutMs || 60000), 60000);
 
   return {
     ...config,
@@ -2616,7 +2621,7 @@ function isServerlessChatFastPathEnabled() {
 }
 
 function isServerlessChatBackgroundQueueEnabled() {
-  return isEnabledEnvFlag("AI_CHAT_BACKGROUND_QUEUE_ENABLED");
+  return !/^(0|false|no|off)$/i.test(String(process.env.AI_CHAT_BACKGROUND_QUEUE_ENABLED || "").trim());
 }
 
 function shouldUseServerlessQuickCustomerChat(body = {}, processPlan = {}) {
@@ -2648,6 +2653,7 @@ function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {
   if (String(body.type || "chat") !== "chat") return false;
   if (body.customerId) return false;
   if (body.skillId) return false;
+  if (String(body.modelId || "") === "model_local") return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
   return processPlan?.metadata?.default_intent === "document_generation";
@@ -2659,9 +2665,11 @@ function shouldQueueServerlessDefaultGeneralChat(body = {}, processPlan = {}) {
   if (String(body.type || "chat") !== "chat") return false;
   if (body.customerId) return false;
   if (body.skillId) return false;
+  if (String(body.modelId || "") === "model_local") return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
-  return ["general_chat", "planning", "work_analysis"].includes(processPlan?.metadata?.default_intent);
+  if (processPlan?.metadata?.agent_intent === "web_research" || (processPlan?.metadata?.agent_tools || []).includes("web.search")) return false;
+  return ["planning", "work_analysis"].includes(processPlan?.metadata?.default_intent);
 }
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {
@@ -2685,6 +2693,7 @@ function shouldQueueServerlessChatGeneration(body = {}, processPlan = {}) {
   if (String(body.modelId || "") === "model_local") return false;
   if (processPlan?.metadata?.customer_intent === "customer_work") return false;
   if (processPlan?.metadata?.default_intent === "customer_work") return false;
+  if (processPlan?.metadata?.agent_intent === "web_research" || (processPlan?.metadata?.agent_tools || []).includes("web.search")) return false;
   if (Array.isArray(body.extraContext?.chatAttachments) && body.extraContext.chatAttachments.length) return true;
 
   const intent = processPlan?.metadata?.default_intent || "";
@@ -3590,8 +3599,6 @@ function isDefaultWorkspaceDocumentIntent(message = "") {
   if (!text) return false;
   const documentTarget = /(需求文档|需求说明|需求清单|prd|产品需求|功能清单|业务清单|模块清单|方案|方案大纲|解决方案|报告|文档|PPT|ppt|结构稿|大纲|计划书|流程图|说明书|模板|话术|提示词)/i;
   const documentAction = /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/;
-  const featureInventoryQuestion = /(小程序|系统|平台|应用|app|后台|管理端|用户端|客户端|商城|CRM|crm|SaaS|saas|网站|官网|门户).{0,30}(有哪些|包含哪些|需要哪些|应该有哪些|要哪些|做哪些|支持哪些).{0,12}(功能|模块|页面|菜单)|(功能|模块|页面|菜单).{0,12}(有哪些|怎么设计|如何设计|怎么规划|如何规划)/i;
-  if (featureInventoryQuestion.test(text)) return true;
   return documentTarget.test(text) && documentAction.test(text);
 }
 
@@ -3653,6 +3660,35 @@ function buildProcessStep(id, title, summary, detail) {
   };
 }
 
+function emitAgentDecision(send, processPlan = {}) {
+  const decision = processPlan.agentDecision || {};
+  const routing = decision.routing || {};
+  const policy = decision.policy || {};
+  const tools = Array.isArray(decision.tools) ? decision.tools : [];
+  send("agent_decision", {
+    metadata: processPlan.metadata || {},
+    intent: {
+      key: routing.intent || "",
+      label: routing.label || "",
+      confidence: routing.confidence || 0,
+      reason: routing.reason || ""
+    },
+    policy: {
+      executionMode: policy.executionMode || "",
+      responseMode: policy.responseMode || "",
+      reason: policy.reason || "",
+      guardrails: policy.guardrails || []
+    },
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      category: tool.category,
+      mode: tool.mode,
+      status: tool.status,
+      description: tool.description
+    }))
+  });
+}
+
 function emitProcessStep(send, step, status, overrides = {}) {
   if (!step) return;
   const payload = {
@@ -3660,7 +3696,8 @@ function emitProcessStep(send, step, status, overrides = {}) {
     title: step.title,
     status,
     summary: overrides.summary || step.summary || "",
-    detail: overrides.detail || step.detail || ""
+    detail: overrides.detail || step.detail || "",
+    updatedAt: nowIso()
   };
   send(status === "running" ? "process_start" : "process_update", payload);
 }

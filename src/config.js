@@ -40,7 +40,7 @@ export function getConfig() {
     openaiProxyUrl: process.env.OPENAI_PROXY_URL || "",
     openaiTimeoutMs: Number(process.env.OPENAI_TIMEOUT_MS || 60000),
     openaiReasoningEffort: normalizeReasoningEffort(process.env.OPENAI_REASONING_EFFORT || "low"),
-    backgroundAiTimeoutMs: Number(process.env.BACKGROUND_AI_TIMEOUT_MS || 60000),
+    backgroundAiTimeoutMs: Number(process.env.BACKGROUND_AI_TIMEOUT_MS || 360000),
     pptTaskTimeoutMs: Number(process.env.PPT_TASK_TIMEOUT_MS || 1800000),
     aiContextMaxChars: Number(process.env.AI_CONTEXT_MAX_CHARS || 16000),
     aiPromptMaxChars: Number(process.env.AI_PROMPT_MAX_CHARS || 22000),

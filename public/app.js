@@ -3793,6 +3793,16 @@ async function submitChat(form) {
         mergeChatProcessStep(assistantMessage, step);
         queueChatMessagesUpdate();
       },
+      onAgentDecision(payload) {
+        assistantMessage.agentTrace = payload;
+        if (payload?.metadata) {
+          assistantMessage.metadata = {
+            ...(assistantMessage.metadata || {}),
+            ...payload.metadata
+          };
+        }
+        queueChatMessagesUpdate();
+      },
       onAnswerDelta(delta) {
         assistantMessage.content += delta;
         assistantMessage.answerStarted = true;
@@ -3829,7 +3839,7 @@ async function submitChat(form) {
     if (!assistantMessage.content && data?.generation?.outputContent) {
       assistantMessage.content = data.generation.outputContent;
     }
-    if (data.record?.id && shouldRenderSkillResultCard({ skillId, record: data.record, toolMode })) {
+    if (data.record?.id && shouldRenderSkillResultCard({ skillId, record: data.record, toolMode, metadata: assistantMessage.metadata })) {
       const recordStatus = getRecordJobStatus(data.record);
       const isQueuedRecord = ["generating", "queued", "running", "pending"].includes(String(recordStatus || "").toLowerCase());
       assistantMessage.skillCard = buildSkillResultCard(data.record, activeSession, customerId);
@@ -3904,9 +3914,11 @@ function isSimpleChatMessage(message = "", options = {}) {
   return /^(谢谢|谢谢你|谢了|辛苦了|好的|好|收到|ok|okay|ok了|明白了|了解了|嗯|嗯嗯|可以|行|行的|拜拜|再见)$/i.test(text);
 }
 
-function shouldRenderSkillResultCard({ skillId, record, toolMode }) {
+function shouldRenderSkillResultCard({ skillId, record, toolMode, metadata = {} }) {
   if (!record?.id) return false;
   if (skillId) return true;
+  if (metadata.agent_response_mode === "document_card" && metadata.used_skill) return true;
+  if (metadata.background_generation || metadata.queued_remote_generation) return true;
   if (toolMode === "image2") return true;
   return record.generationType && record.generationType !== "chat";
 }
@@ -3947,7 +3959,8 @@ function mergeChatProcessStep(message, step = {}) {
     title: step.title || "处理任务",
     status: step.status || "running",
     summary: step.summary || "",
-    detail: step.detail || ""
+    detail: step.detail || "",
+    updatedAt: step.updatedAt || new Date().toISOString()
   };
   const existingIndex = message.process.findIndex((item) => item.id === normalized.id);
   if (existingIndex >= 0) {
@@ -5476,10 +5489,12 @@ function renderChatProcessPanel(item) {
   const steps = Array.isArray(item.process) ? item.process.filter((step) => step?.id) : [];
   const complexity = item.metadata?.complexity || item.meta?.complexity || "";
   if (!steps.length || complexity === "simple") return "";
-  const intentLabel = item.metadata?.default_intent_label || item.metadata?.referenced_customer_name || "";
+  const trace = normalizeAgentTrace(item);
+  const intentLabel = trace.intentLabel || item.metadata?.default_intent_label || item.metadata?.referenced_customer_name || "";
   const doneCount = steps.filter((step) => step.status === "done").length;
   const hasFailure = steps.some((step) => step.status === "failed" || step.status === "error");
   const runningStep = steps.find((step) => step.status === "running");
+  const progress = steps.length ? Math.round((doneCount / steps.length) * 100) : 0;
   const subtitle = hasFailure
     ? "任务过程出现异常，可展开查看原因"
     : runningStep
@@ -5491,10 +5506,12 @@ function renderChatProcessPanel(item) {
         <summary>
           <span class="processPanelIcon ${hasFailure ? "failed" : item.streaming ? "running" : "done"}"></span>
           <span>
-            <strong>Agent 任务过程</strong>
+            <strong>${escapeHtml(trace.title || "Agent 任务过程")}</strong>
             <small>${escapeHtml(subtitle)}</small>
           </span>
+          <span class="processProgressValue">${escapeHtml(hasFailure ? "异常" : `${progress}%`)}</span>
         </summary>
+        ${renderAgentTraceBar(trace, steps)}
         <div class="processStepList">
           ${steps.map(renderChatProcessStep).join("")}
         </div>
@@ -5506,6 +5523,13 @@ function renderChatProcessPanel(item) {
 function renderChatProcessStep(step) {
   const status = ["running", "done", "failed", "error"].includes(step.status) ? step.status : "pending";
   const detail = String(step.detail || "").trim();
+  const statusLabel = {
+    pending: "等待",
+    running: "执行中",
+    done: "完成",
+    failed: "异常",
+    error: "异常"
+  }[status] || "等待";
   return `
     <details class="processStep ${status}">
       <summary>
@@ -5514,9 +5538,54 @@ function renderChatProcessStep(step) {
           <strong>${escapeHtml(step.title || "处理任务")}</strong>
           ${step.summary ? `<small>${escapeHtml(step.summary)}</small>` : ""}
         </span>
+        <span class="processStepStatus">${escapeHtml(statusLabel)}</span>
       </summary>
       ${detail ? `<div class="processStepDetail">${escapeHtml(detail)}</div>` : ""}
     </details>
+  `;
+}
+
+function normalizeAgentTrace(item = {}) {
+  const metadata = item.metadata || {};
+  const trace = item.agentTrace || {};
+  const intent = trace.intent || {};
+  const policy = trace.policy || {};
+  const tools = Array.isArray(trace.tools) ? trace.tools : [];
+  const intentLabel = intent.label || metadata.agent_intent_label || metadata.default_intent_label || metadata.referenced_customer_name || "";
+  const executionMode = policy.executionMode || metadata.agent_execution_mode || "";
+  const responseMode = policy.responseMode || metadata.agent_response_mode || "";
+  const confidence = Number(intent.confidence || metadata.agent_confidence || 0);
+  return {
+    title: intentLabel ? `Agent · ${intentLabel}` : "Agent 任务过程",
+    intentLabel,
+    confidence,
+    executionMode,
+    responseMode,
+    policyReason: policy.reason || "",
+    intentReason: intent.reason || "",
+    tools: tools.length ? tools : (metadata.agent_tools || []).map((name) => ({ name, status: "ready" }))
+  };
+}
+
+function renderAgentTraceBar(trace, steps = []) {
+  const chips = [];
+  if (trace.intentLabel) chips.push(["意图", trace.intentLabel]);
+  if (trace.confidence) chips.push(["置信度", `${Math.round(trace.confidence * 100)}%`]);
+  if (trace.executionMode) chips.push(["模式", trace.executionMode === "background" ? "后台完整生成" : "同步回答"]);
+  if (trace.responseMode) chips.push(["呈现", trace.responseMode === "document_card" ? "文档卡片" : trace.responseMode === "image_job" ? "图片任务" : "文本回答"]);
+  const toolNames = trace.tools.map((tool) => tool.name).filter(Boolean);
+  const reason = trace.policyReason || trace.intentReason || "";
+  return `
+    <div class="agentTraceBar">
+      <div class="agentTraceChips">
+        ${chips.map(([label, value]) => `<span><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>`).join("")}
+        ${toolNames.length ? `<span><b>工具</b>${escapeHtml(toolNames.join(" · "))}</span>` : ""}
+      </div>
+      <div class="agentTraceProgress" aria-hidden="true">
+        ${steps.map((step) => `<i class="${escapeAttr(step.status || "pending")}"></i>`).join("")}
+      </div>
+      ${reason ? `<p>${escapeHtml(reason)}</p>` : ""}
+    </div>
   `;
 }
 
@@ -5789,6 +5858,7 @@ async function postJsonStream(url, body, handlers = {}) {
   const dispatchEvent = (eventName, payload) => {
     if (!eventName || !payload) return;
     if (eventName === "status") handlers.onStatus?.(payload.message || "");
+    else if (eventName === "agent_decision") handlers.onAgentDecision?.(payload);
     else if (eventName === "process_start") handlers.onProcessStart?.(payload);
     else if (eventName === "process_update") handlers.onProcessUpdate?.(payload);
     else if (eventName === "answer_delta") handlers.onAnswerDelta?.(payload.content || "");

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { handleApiRequest, handleApiStreamRequest, runImageBackgroundJob } from "../src/api-routes.js";
+import { buildAgentDecision } from "../src/agent/runtime.js";
 import { organizeContent } from "../src/organizer.js";
 import { markdownToNotionBlocks } from "../src/markdown-to-notion.js";
 
@@ -70,6 +71,33 @@ const bootstrap = await handleApiRequest({
 assert.ok(bootstrap.body.db.customers.length >= 1);
 assert.ok(bootstrap.body.db.skills.length >= 1);
 assert.ok(bootstrap.body.db.skills.some((skill) => /轻量级方案\s*PPT/.test(skill.name)));
+
+const agentDecisionGeneral = buildAgentDecision({
+  body: {
+    type: "chat",
+    message: "关于生图模型，有几个不同的模型？",
+    modelId: "model_openai",
+    extraContext: { workspaceMode: "default_ai_workspace" }
+  },
+  db: bootstrap.body.db,
+  user: login.body.user
+});
+assert.equal(agentDecisionGeneral.routing.intent, "general_chat");
+assert.notEqual(agentDecisionGeneral.routing.intent, "image_generation");
+assert.equal(agentDecisionGeneral.policy.executionMode, "background");
+
+const agentDecisionCustomer = buildAgentDecision({
+  body: {
+    type: "chat",
+    message: "帮我分析两个客户，我应该给他们发什么话术",
+    modelId: "model_local",
+    extraContext: { workspaceMode: "default_ai_workspace" }
+  },
+  db: bootstrap.body.db,
+  user: login.body.user
+});
+assert.equal(agentDecisionCustomer.routing.intent, "customer_talktrack");
+assert.ok(agentDecisionCustomer.tools.some((tool) => tool.name === "crm.getCustomerContext"));
 
 const originalServerlessRuntime = process.env.JIMU_SERVERLESS_RUNTIME;
 const originalFastPathFlag = process.env.AI_CHAT_FAST_PATH_ENABLED;
@@ -146,10 +174,16 @@ try {
       }
     }));
     assert.equal(result.statusCode, 200);
+    const agentDecision = getSseEvent(result.events, "agent_decision");
+    assert.equal(agentDecision?.intent?.key, "skill_execution");
+    assert.equal(agentDecision?.policy?.responseMode, "document_card");
     const done = getSseEvent(result.events, "done");
     assert.ok(done?.generation);
     assert.notEqual(done.metadata?.background_generation, true);
     assert.notEqual(done.metadata?.queued_remote_generation, true);
+    assert.equal(done.metadata?.agent_runtime, "agent-runtime-v1");
+    assert.equal(done.metadata?.agent_intent, "skill_execution");
+    assert.equal(done.metadata?.agent_response_mode, "document_card");
     assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
     assert.doesNotMatch(done.generation.outputContent || "", /后台远程生成|帮助中心/);
     assert.ok(String(done.generation.outputContent || "").length > 120);
@@ -170,8 +204,12 @@ try {
       config
     }));
     assert.equal(result.statusCode, 200);
+    const agentDecision = getSseEvent(result.events, "agent_decision");
+    assert.equal(agentDecision?.intent?.key, "document_generation");
     const done = getSseEvent(result.events, "done");
     assert.ok(done?.generation);
+    assert.equal(done.metadata?.agent_runtime, "agent-runtime-v1");
+    assert.equal(done.metadata?.agent_intent, "document_generation");
     assert.notEqual(done.metadata?.background_generation, true);
     assert.notEqual(done.metadata?.queued_remote_generation, true);
     assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
@@ -179,7 +217,7 @@ try {
     assert.ok(String(done.generation.outputContent || "").length > 120);
   });
 
-  await check("feature inventory question with local model returns synchronously", async () => {
+  await check("feature inventory question stays a general model answer", async () => {
     const result = await withBackgroundJobStub(async () => captureStream({
       body: {
         type: "chat",
@@ -196,7 +234,9 @@ try {
     assert.equal(result.statusCode, 200);
     const done = getSseEvent(result.events, "done");
     assert.ok(done?.generation);
-    assert.equal(done.metadata?.default_intent, "document_generation");
+    assert.equal(done.metadata?.default_intent, "general_chat");
+    assert.equal(done.metadata?.agent_runtime, "agent-runtime-v1");
+    assert.equal(done.metadata?.agent_intent, "general_chat");
     assert.notEqual(done.metadata?.background_generation, true);
     assert.notEqual(done.metadata?.queued_remote_generation, true);
     assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
@@ -222,6 +262,8 @@ try {
     const done = getSseEvent(result.events, "done");
     assert.ok(done?.generation);
     assert.equal(done.generation.modelName, "联网资料汇总");
+    assert.equal(done.metadata?.agent_runtime, "agent-runtime-v1");
+    assert.equal(done.metadata?.agent_intent, "web_research");
     assert.equal(done.generation.inputContext.webResearch.used, true);
     assert.match(done.generation.outputContent || "", /深圳软件外包公司A/);
     assert.doesNotMatch(done.generation.outputContent || "", /模型返回异常|远程模型 .*调用失败/);
