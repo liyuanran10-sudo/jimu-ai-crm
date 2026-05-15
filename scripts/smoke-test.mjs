@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { handleApiRequest } from "../src/api-routes.js";
+import { handleApiRequest, handleApiStreamRequest, runImageBackgroundJob } from "../src/api-routes.js";
 import { organizeContent } from "../src/organizer.js";
 import { markdownToNotionBlocks } from "../src/markdown-to-notion.js";
 
@@ -71,6 +71,168 @@ assert.ok(bootstrap.body.db.customers.length >= 1);
 assert.ok(bootstrap.body.db.skills.length >= 1);
 assert.ok(bootstrap.body.db.skills.some((skill) => /轻量级方案\s*PPT/.test(skill.name)));
 
+const originalServerlessRuntime = process.env.JIMU_SERVERLESS_RUNTIME;
+const originalFastPathFlag = process.env.AI_CHAT_FAST_PATH_ENABLED;
+const originalBackgroundQueueFlag = process.env.AI_CHAT_BACKGROUND_QUEUE_ENABLED;
+const originalUrl = process.env.URL;
+process.env.JIMU_SERVERLESS_RUNTIME = "netlify";
+delete process.env.AI_CHAT_FAST_PATH_ENABLED;
+delete process.env.AI_CHAT_BACKGROUND_QUEUE_ENABLED;
+
+try {
+  await check("simple greeting stays fast", async () => {
+    const result = await captureStream({
+      body: {
+        type: "chat",
+        message: "你好",
+        userId: "user_admin",
+        modelId: "model_local",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    });
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.equal(done.generation.prompt, "simple_query_shortcut");
+    assert.match(done.generation.outputContent || "", /你好|我在/);
+  });
+
+  await check("identity question no longer uses simple shortcut", async () => {
+    const result = await captureStream({
+      body: {
+        type: "chat",
+        message: "你是谁",
+        userId: "user_admin",
+        modelId: "model_local",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    });
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.notEqual(done.generation.prompt, "simple_query_shortcut");
+    assert.doesNotMatch(done.generation.outputContent || "", /simple_query_shortcut|快速回复/);
+  });
+
+  await check("customer skill chat returns synchronously", async () => {
+    const skillId = bootstrap.body.db.skills.find((skill) => /方案大纲/.test(skill.name || ""))?.id || bootstrap.body.db.skills[0]?.id || "";
+    const result = await withBackgroundJobStub(async () => captureStream({
+      body: {
+        type: "chat",
+        customerId: bootstrap.body.db.customers[0].id,
+        message: "请直接生成方案大纲，按客户当前上下文输出。",
+        userId: "user_admin",
+        skillId,
+        modelId: "model_local",
+        extraContext: {
+          workspaceMode: "customer",
+          conversationHistory: [],
+          chatAttachments: []
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config: {
+        ...config,
+        webCrawlerProvider: "jina",
+        webResearchMaxCrawlUrls: 1
+      }
+    }));
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.notEqual(done.metadata?.background_generation, true);
+    assert.notEqual(done.metadata?.queued_remote_generation, true);
+    assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
+    assert.doesNotMatch(done.generation.outputContent || "", /后台远程生成|帮助中心/);
+    assert.ok(String(done.generation.outputContent || "").length > 120);
+  });
+
+  await check("document chat with local model returns synchronously", async () => {
+    const result = await withBackgroundJobStub(async () => captureStream({
+      body: {
+        type: "chat",
+        message: "帮我生成一个CRM需求文档，包含模块、流程和实施计划。",
+        userId: "user_admin",
+        modelId: "model_local",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    }));
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.notEqual(done.metadata?.background_generation, true);
+    assert.notEqual(done.metadata?.queued_remote_generation, true);
+    assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
+    assert.doesNotMatch(done.generation.outputContent || "", /后台生成中|帮助中心/);
+    assert.ok(String(done.generation.outputContent || "").length > 120);
+  });
+
+  await check("feature inventory question with local model returns synchronously", async () => {
+    const result = await withBackgroundJobStub(async () => captureStream({
+      body: {
+        type: "chat",
+        message: "行政小程序应该有哪些功能",
+        userId: "user_admin",
+        modelId: "model_local",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    }));
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.equal(done.metadata?.default_intent, "document_generation");
+    assert.notEqual(done.metadata?.background_generation, true);
+    assert.notEqual(done.metadata?.queued_remote_generation, true);
+    assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
+    assert.doesNotMatch(done.generation.outputContent || "", /后台生成中|帮助中心/);
+    assert.ok(String(done.generation.outputContent || "").length > 120);
+  });
+
+  await check("company list question uses web research answer without remote model", async () => {
+    const result = await withWebResearchStub(async () => captureStream({
+      body: {
+        type: "chat",
+        message: "深圳的软件外包公司有哪些",
+        userId: "user_admin",
+        modelId: "model_openai",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    }));
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.equal(done.generation.modelName, "联网资料汇总");
+    assert.equal(done.generation.inputContext.webResearch.used, true);
+    assert.match(done.generation.outputContent || "", /深圳软件外包公司A/);
+    assert.doesNotMatch(done.generation.outputContent || "", /模型返回异常|远程模型 .*调用失败/);
+  });
+} finally {
+  restoreEnv("JIMU_SERVERLESS_RUNTIME", originalServerlessRuntime);
+  restoreEnv("AI_CHAT_FAST_PATH_ENABLED", originalFastPathFlag);
+  restoreEnv("AI_CHAT_BACKGROUND_QUEUE_ENABLED", originalBackgroundQueueFlag);
+  restoreEnv("URL", originalUrl);
+}
+
 const generation = await handleApiRequest({
   method: "POST",
   pathname: "/api/crm/generate",
@@ -104,6 +266,15 @@ assert.match(feishuSyncWithoutConfig.body.error, /飞书未配置/);
 
 console.log("Smoke test passed.");
 
+async function check(name, run) {
+  try {
+    return await run();
+  } catch (error) {
+    error.message = `${name}: ${error.message}`;
+    throw error;
+  }
+}
+
 async function waitForGenerationCompletion(recordId, headers, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let record = null;
@@ -120,4 +291,140 @@ async function waitForGenerationCompletion(recordId, headers, timeoutMs = 5000) 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return record;
+}
+
+async function captureStream({ body, headers, config }) {
+  const response = createStreamRecorder();
+  const streamed = await handleApiStreamRequest({
+    method: "POST",
+    pathname: "/api/crm/generate-stream",
+    body,
+    headers,
+    config,
+    response
+  });
+  assert.equal(streamed, true);
+  return {
+    statusCode: response.statusCode,
+    events: parseSseEvents(response.body)
+  };
+}
+
+async function withBackgroundJobStub(run) {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.URL;
+  process.env.URL = "https://example.com";
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).includes("/.netlify/functions/image-job-background")) {
+      const payload = JSON.parse(String(options.body || "{}"));
+      await runImageBackgroundJob({
+        kind: payload.kind,
+        recordId: payload.recordId,
+        body: payload.body || {},
+        itemId: payload.itemId || "",
+        modification: payload.modification || "",
+        actorUser: payload.actorUser || { id: "system", name: "系统任务", role: "admin" },
+        config
+      });
+      return new Response(JSON.stringify({ ok: true, message: "background job accepted" }), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    return originalFetch(url, options);
+  };
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreEnv("URL", originalUrl);
+  }
+}
+
+async function withWebResearchStub(run) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const textUrl = String(url);
+    if (/tokenrouter\.tech|api\.openai\.com/.test(textUrl)) {
+      throw new Error(`remote model should not be called: ${textUrl}`);
+    }
+    if (textUrl.startsWith("https://s.jina.ai/")) {
+      return new Response([
+        "Title: 深圳软件外包公司A",
+        "URL Source: https://example.com/company-a",
+        "Description: 深圳本地软件外包与系统定制服务商。",
+        "",
+        "Title: 深圳软件外包公司B",
+        "URL Source: https://example.com/company-b",
+        "Description: 提供小程序、SaaS 和企业后台开发服务。"
+      ].join("\n"), {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" }
+      });
+    }
+    if (textUrl.startsWith("https://r.jina.ai/")) {
+      return new Response("# 深圳软件外包公司A\n\n公开页面显示，该公司提供软件外包、小程序开发和企业系统定制服务。", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" }
+      });
+    }
+    throw new Error(`unexpected external fetch: ${textUrl}`);
+  };
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function createStreamRecorder() {
+  const chunks = [];
+  return {
+    destroyed: false,
+    writableEnded: false,
+    statusCode: 0,
+    headers: {},
+    writeHead(status, nextHeaders = {}) {
+      this.statusCode = status;
+      this.headers = { ...this.headers, ...nextHeaders };
+    },
+    write(chunk) {
+      chunks.push(String(chunk || ""));
+    },
+    end(chunk = "") {
+      if (chunk) chunks.push(String(chunk));
+      this.writableEnded = true;
+    },
+    get body() {
+      return chunks.join("");
+    }
+  };
+}
+
+function parseSseEvents(text = "") {
+  return String(text || "")
+    .trim()
+    .split(/\n\n+/)
+    .filter(Boolean)
+    .map((block) => {
+      const eventMatch = block.match(/^event:\s*(.+)$/m);
+      const dataMatch = block.match(/^data:\s*(.+)$/m);
+      const data = dataMatch ? JSON.parse(dataMatch[1]) : null;
+      return {
+        event: eventMatch ? eventMatch[1].trim() : "",
+        data
+      };
+    });
+}
+
+function getSseEvent(events, eventName) {
+  return events.find((item) => item.event === eventName)?.data || null;
+}
+
+function restoreEnv(name, value) {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
 }

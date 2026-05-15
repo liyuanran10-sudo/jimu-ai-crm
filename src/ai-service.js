@@ -593,6 +593,22 @@ export async function streamCrmContent({ db, type, customerId, skillId, userId, 
   const { generationType, customer, skill, model, context, title, prompt, storedPrompt } = prepared;
 
   await onStatus?.(isDefaultAgentChat ? "正在整理回答结构..." : "正在连接 AI 模型...");
+  if (shouldUseDirectWebResearchAnswer({ generationType, customer, context })) {
+    await onStatus?.("正在整理联网检索结果...");
+    const outputContent = buildDirectWebResearchMarkdown({ message, context });
+    await streamTextChunks(outputContent, onToken);
+    return {
+      title: buildDirectWebResearchTitle(message),
+      generationType,
+      skillId: skill?.id || "",
+      modelName: "联网资料汇总",
+      prompt: storedPrompt,
+      inputContext: context,
+      outputContent,
+      createdAt: nowIso()
+    };
+  }
+
   const remote = await maybeStreamWithRemoteModel({
     model,
     config,
@@ -648,6 +664,69 @@ export async function streamCrmContent({ db, type, customerId, skillId, userId, 
     outputContent,
     createdAt: nowIso()
   };
+}
+
+function shouldUseDirectWebResearchAnswer({ generationType, customer, context }) {
+  if (generationType !== "chat") return false;
+  if (customer) return false;
+  if (!context?.webResearch?.used) return false;
+  const defaultAgent = context?.defaultAgent;
+  const intents = ensureArray(defaultAgent?.router?.intents);
+  const primaryIntent = String(defaultAgent?.router?.primaryIntent || "").trim();
+  return intents.some((item) => item.key === "web_research") || primaryIntent === "联网调研";
+}
+
+function buildDirectWebResearchMarkdown({ message = "", context = {} }) {
+  const webResearch = context.webResearch || {};
+  const title = "联网资料整理";
+  const results = ensureArray(webResearch.results);
+  const pages = ensureArray(webResearch.pages);
+  const lines = [
+    `# ${title}`,
+    "",
+    `> 我已根据「${String(message || "").trim() || "当前问题"}」整理公开资料与网页摘要。`,
+    ""
+  ];
+  if (webResearch.searchedAt) {
+    lines.push(`检索时间：${formatDateTime(webResearch.searchedAt)}`);
+    lines.push("");
+  }
+  if (results.length) {
+    lines.push("## 相关结果");
+    for (const item of results.slice(0, 6)) {
+      const snippet = String(item.snippet || "").replace(/\s+/g, " ").slice(0, 160);
+      lines.push(`- [${item.title || item.url}](${item.url})${snippet ? `：${snippet}` : ""}`);
+    }
+    lines.push("");
+  }
+  if (pages.length) {
+    lines.push("## 网页摘要");
+    for (const page of pages.slice(0, 3)) {
+      const summary = String(page.text || "").replace(/\s+/g, " ").slice(0, 220);
+      lines.push(`- [${page.title || page.url}](${page.url})：${summary}`);
+    }
+    lines.push("");
+  }
+  if (webResearch.errors?.length) {
+    lines.push("## 联网提示");
+    for (const error of ensureArray(webResearch.errors).slice(0, 3)) {
+      lines.push(`- ${error}`);
+    }
+    lines.push("");
+  }
+  lines.push("## 下一步");
+  lines.push("");
+  lines.push("- 如果要更精确，我可以继续按行业、规模、技术栈、交付经验、报价区间和地区进一步筛选。");
+  lines.push("- 如果你要的是对比表，我也可以把这些公开信息整理成表格。");
+  return lines.join("\n").trim();
+}
+
+function buildDirectWebResearchTitle(message = "") {
+  const text = String(message || "");
+  if (/(公司|企业|服务商|供应商|机构|外包|开发商|厂商).{0,18}(有哪些|哪些|推荐|排名|名单|几家)/i.test(text)) {
+    return "公司/服务商名单";
+  }
+  return "联网资料整理";
 }
 
 export async function testCrmModel({ db, modelId, config }) {
@@ -1058,8 +1137,9 @@ function detectDefaultAgentIntent({ message, skill, extraContext = {}, webResear
     && /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/.test(text)) {
     add("document_generation", "文档生成", 0.88, "输入要求生成可交付文档，应直接输出完整结构，而不是要求先选择客户。");
   }
-  if (/联网|搜索|最新|市场|竞品|政策|新闻|官网|网页|爬虫/.test(text) || webResearch?.used) {
-    add("web_research", "联网调研", webResearch?.used ? 0.88 : 0.72, webResearch?.used ? "联网检索已经执行。" : "输入可能需要最新外部信息。");
+  const companyListQuestion = /(有哪些|哪些|推荐|排名|名单|几家).{0,18}(公司|企业|服务商|供应商|机构|外包|开发商|厂商)|(公司|企业|服务商|供应商|机构|外包|开发商|厂商).{0,18}(有哪些|哪些|推荐|排名|名单|几家)/i.test(text);
+  if (/联网|搜索|最新|市场|竞品|政策|新闻|官网|网页|爬虫/.test(text) || companyListQuestion || webResearch?.used) {
+    add("web_research", "联网调研", webResearch?.used ? 0.88 : companyListQuestion ? 0.84 : 0.72, webResearch?.used ? "联网检索已经执行。" : companyListQuestion ? "输入要求查询公司、服务商或公开名单，需要联网核验。" : "输入可能需要最新外部信息。");
   }
   if (/skill|技能|提示词|prompt|模板|复用能力/.test(text) || skill) {
     add("skill_execution", "Skill 执行", skill ? 0.86 : 0.74, skill ? `用户选择或系统匹配 Skill：${skill.name}` : "输入涉及 Skill、提示词或复用能力沉淀。");

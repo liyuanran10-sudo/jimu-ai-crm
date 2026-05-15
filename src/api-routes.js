@@ -484,6 +484,67 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return true;
     }
 
+    if (shouldQueueServerlessChatGeneration(streamBody, processPlan)) {
+      const customer = streamBody.customerId ? authDb.customers.find((item) => item.id === streamBody.customerId) || null : null;
+      const generationBody = buildGenerationRequestBody(authDb, {
+        ...streamBody,
+        type: resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan)
+      }, customer, actor.user);
+      const pendingGeneration = buildPendingBackgroundGeneration({
+        db: authDb,
+        type: generationBody.type,
+        customer,
+        skillId: generationBody.skillId || streamBody.skillId || "",
+        userId: generationBody.userId || actor.user.id,
+        message: generationBody.message || streamBody.message,
+        extraContext: generationBody.extraContext || streamBody.extraContext,
+        reason: customer
+          ? "当前客户对话已提交后台远程生成，完成后会在帮助中心提醒。"
+          : "当前对话已提交后台远程生成，完成后会在帮助中心提醒。"
+      });
+      pendingGeneration.inputContext = {
+        ...(pendingGeneration.inputContext || {}),
+        messageType: "ai_response",
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          background_generation: true,
+          queued_remote_generation: true
+        }
+      };
+      const result = await withCrmDb((db) => {
+        const record = saveGenerationRecord(db, generationBody, actor, pendingGeneration);
+        return { record, memory: null };
+      });
+      emitProcessStep(send, processPlan.steps[2], "done");
+      emitProcessStep(send, processPlan.steps[3], "running");
+      await queueCrmGenerationJob({
+        recordId: result.record.id,
+        body: {
+          ...generationBody,
+          customerId: generationBody.customerId || "",
+          userId: generationBody.userId || actor.user.id
+        },
+        actorUser: actor.user,
+        config
+      });
+      emitProcessStep(send, processPlan.steps[3], "done");
+      await streamSseText(pendingGeneration.outputContent, send, "answer_delta");
+      send("done", {
+        ok: true,
+        generation: pendingGeneration,
+        record: result.record,
+        memory: result.memory,
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          background_generation: true,
+          queued_remote_generation: true
+        }
+      });
+      return true;
+    }
+
     const streamConfig = buildRuntimeStreamConfig(config, streamBody, processPlan);
     const remoteGenerationType = resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan);
     let streamedAnswer = "";
@@ -666,6 +727,49 @@ export async function runImageBackgroundJob({ kind, recordId, body = {}, itemId 
   throw new Error(`Unsupported image background job: ${kind || "unknown"}`);
 }
 
+export async function markBackgroundJobFailed({ kind, recordId, body = {}, itemId = "", errorText = "" }) {
+  const safeError = errorText || "Netlify 后台任务失败";
+  if (!recordId) return;
+  if (kind === "default_image") {
+    await markImageJobFailed({
+      recordId,
+      title: "默认 AI 工作台 - image2 生图",
+      errorText: safeError
+    });
+    return;
+  }
+  if (kind === "interaction_image") {
+    await markImageJobFailed({
+      recordId,
+      title: "交互图",
+      errorText: safeError
+    });
+    return;
+  }
+  if (kind === "interaction_image_regenerate") {
+    await markInteractionImageItemFailed({
+      recordId,
+      itemId,
+      errorText: safeError
+    });
+    return;
+  }
+  if (kind === "crm_generation" || kind === "historical_solution") {
+    await markCrmGenerationJobFailed({
+      recordId,
+      title: kind === "historical_solution" ? "加入历史方案库" : (GENERATION_LABELS_FOR_SYNC[body.type] || body.type || "AI 生成"),
+      errorText: safeError
+    });
+    return;
+  }
+  if (kind === "report_feedback") {
+    await markReportFeedbackJobFailed({
+      feedbackId: recordId,
+      errorText: safeError
+    });
+  }
+}
+
 async function runDefaultImageJob({ recordId, body, actorUser, config }) {
   const db = await readCrmDb();
   const actor = { user: actorUser };
@@ -711,7 +815,7 @@ async function runDefaultImageJob({ recordId, body, actorUser, config }) {
   const finishedAt = nowIso();
   const jobStatus = imageResult.usedFallback ? "failed" : "completed";
 
-  await withCrmDb((nextDb) => {
+  const writeGeneratedRecord = () => withCrmDb((nextDb) => {
     const existing = nextDb.aiGenerationRecords.find((item) => item.id === recordId);
     if (!existing) return null;
     return upsertCollectionItem(nextDb, "aiGenerationRecords", {
@@ -954,7 +1058,7 @@ async function runInteractionImageJob({ recordId, body, actorUser, config }) {
     createdAt: finishedAt
   };
 
-  await withCrmDb((nextDb) => {
+  const writeGeneratedRecord = () => withCrmDb((nextDb) => {
     const existing = nextDb.aiGenerationRecords.find((item) => item.id === recordId);
     if (!existing) return null;
     const record = upsertCollectionItem(nextDb, "aiGenerationRecords", {
@@ -1205,7 +1309,7 @@ async function markInteractionImageItemFailed({ recordId, itemId, errorText }) {
   const status = items.some((item) => ["generating", "queued", "running"].includes(item.status))
     ? "generating"
     : items.some((item) => item.status === "completed") ? "completed" : "failed";
-  await withCrmDb((nextDb) => {
+  const savedRecord = await withCrmDb((nextDb) => {
     const existing = nextDb.aiGenerationRecords.find((item) => item.id === recordId);
     if (!existing) return null;
     const existingBoard = existing.inputContext?.interactionImageBoard || {};
@@ -1274,7 +1378,8 @@ async function invokeNetlifyImageBackgroundJob({ kind, recordId, body = {}, item
       body,
       itemId,
       modification,
-      actorUser
+      actorUser,
+      internalJobSecret: config.crmAuthSecret || ""
     })
   });
   if (!response.ok && response.status !== 202) {
@@ -1344,6 +1449,7 @@ function queueCustomerHistoricalSolutionJob({ recordId, body, actorUser, config 
 
 async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
   const db = await readCrmDb();
+  console.info("crm background job read db", { recordId, type: body.type || "" });
   const actor = { user: actorUser };
   const customer = body.customerId ? db.customers.find((item) => item.id === body.customerId) : null;
   await updateCrmGenerationJobStep(recordId, {
@@ -1358,6 +1464,7 @@ async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
     status: "running",
     summary: "正在调用模型生成结果。"
   });
+  console.info("crm background job generating", { recordId, type: body.type || "" });
 
   const generation = await withSoftTimeout(
     generateCrmContent({
@@ -1376,24 +1483,35 @@ async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
   );
   const finishedAt = nowIso();
   const failed = isRemoteFailureMarkdown(generation.outputContent);
+  console.info("crm background job generated", { recordId, type: body.type || "", failed });
 
-  await withCrmDb((nextDb) => {
+  const writeGeneratedRecord = (allowCreate = false) => withCrmDb((nextDb) => {
     const existing = nextDb.aiGenerationRecords.find((item) => item.id === recordId);
-    if (!existing) return null;
-    const record = upsertCollectionItem(nextDb, "aiGenerationRecords", {
-      ...existing,
+    if (!existing && !allowCreate) return null;
+    const sourceRecord = existing || {
       id: recordId,
-      customerId: body.customerId || existing.customerId || "",
+      customerId: body.customerId || "",
+      userId: body.userId || actorUser.id,
+      generationType: generation.generationType,
+      skillId: body.skillId || generation.skillId || "",
+      title: generation.title || GENERATION_LABELS_FOR_SYNC[generation.generationType] || "AI 生成",
+      inputContext: {},
+      createdAt: finishedAt
+    };
+    const record = upsertCollectionItem(nextDb, "aiGenerationRecords", {
+      ...sourceRecord,
+      id: recordId,
+      customerId: body.customerId || sourceRecord.customerId || "",
       userId: body.userId || actorUser.id,
       generationType: generation.generationType,
       inputContext: {
         ...generation.inputContext,
         asyncAiJob: {
-          ...(existing.inputContext?.asyncAiJob || {}),
+          ...(sourceRecord.inputContext?.asyncAiJob || {}),
           status: failed ? "failed" : "completed",
           finishedAt,
           error: failed ? extractFailureSummary(generation.outputContent) || "远程模型返回失败内容，已保存可见错误" : "",
-          steps: mergeAsyncJobSteps(existing.inputContext?.asyncAiJob?.steps, [
+          steps: mergeAsyncJobSteps(sourceRecord.inputContext?.asyncAiJob?.steps, [
             buildAsyncJobStep("read_context", "读取客户上下文", "done", customer ? `已读取 ${customer.name} 的客户信息、跟进记录和资料。` : "已读取默认工作台上下文。"),
             buildAsyncJobStep("call_model", "调用 AI 与 Skill", failed ? "failed" : "done", failed ? extractFailureSummary(generation.outputContent) || "模型或 Skill 调用失败。" : "模型已返回结果。"),
             buildAsyncJobStep("write_result", "写入生成结果", failed ? "failed" : "done", failed ? "已写入失败原因，可重新生成。" : "已保存到生成历史。")
@@ -1403,9 +1521,9 @@ async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
       prompt: generation.prompt,
       modelName: generation.modelName || BACKGROUND_AI_MODEL_NAME,
       outputContent: generation.outputContent,
-      skillId: generation.skillId || existing.skillId || "",
-      title: generation.title || existing.title,
-      createdAt: existing.createdAt || finishedAt
+      skillId: generation.skillId || sourceRecord.skillId || "",
+      title: generation.title || sourceRecord.title,
+      createdAt: sourceRecord.createdAt || finishedAt
     });
 
     if (!failed) {
@@ -1433,6 +1551,22 @@ async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
 
     return record;
   });
+  let savedRecord = null;
+  for (let attempt = 0; attempt < 10 && !savedRecord; attempt += 1) {
+    savedRecord = await writeGeneratedRecord();
+    if (!savedRecord && attempt < 9) {
+      console.warn("crm background job awaiting record visibility", { recordId, type: body.type || "", attempt: attempt + 1 });
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250 * (attempt + 1), 1500)));
+    }
+  }
+  if (!savedRecord) {
+    console.warn("crm background job creating missing pending record", { recordId, type: body.type || "" });
+    savedRecord = await writeGeneratedRecord(true);
+  }
+  if (!savedRecord) {
+    throw new Error(`未找到后台任务记录 ${recordId}，无法写回生成结果。`);
+  }
+  console.info("crm background job saved", { recordId, type: body.type || "", status: failed ? "failed" : "completed" });
 }
 
 async function recoverStuckCrmGenerationJobs({ db, config }) {
@@ -1468,90 +1602,16 @@ async function recoverStuckCrmGenerationJobs({ db, config }) {
   if (!stuckRecords.length) return false;
 
   for (const record of stuckRecords) {
-    await recoverStuckCrmGenerationJob(record, db, config);
+    await recoverStuckCrmGenerationJob(record);
   }
   return true;
 }
 
-async function recoverStuckCrmGenerationJob(record, db, config) {
-  const customerId = record.customerId || record.inputContext?.customerId || record.inputContext?.asyncAiJob?.customerId || "";
-  const customer = customerId ? db.customers.find((item) => item.id === customerId) : null;
-  const generation = await generateCrmContent({
-    db,
-    type: record.generationType || record.inputContext?.asyncAiJob?.kind || "follow_strategy",
-    customerId,
-    skillId: record.skillId || "",
-    userId: record.userId || record.inputContext?.generatedBy || "system",
-    message: record.inputContext?.message || "",
-    extraContext: {
-      ...(record.inputContext?.extra || {}),
-      recoveredFromServerlessQueue: true,
-      recoveryReason: "Netlify 后台任务未及时写回，轮询时自动生成兜底结果，避免销售端长期卡在生成中。"
-    },
-    modelId: "model_local",
-    config: {
-      ...config,
-      openaiApiKey: ""
-    }
-  });
-  const finishedAt = nowIso();
-
-  await withCrmDb((nextDb) => {
-    const existing = nextDb.aiGenerationRecords.find((item) => item.id === record.id);
-    if (!existing) return null;
-    const saved = upsertCollectionItem(nextDb, "aiGenerationRecords", {
-      ...existing,
-      inputContext: {
-        ...generation.inputContext,
-        asyncAiJob: {
-          ...(existing.inputContext?.asyncAiJob || {}),
-          status: "completed",
-          finishedAt,
-          recovered: true,
-          recoveryNote: "Netlify 后台任务未及时写回，已由 bootstrap 轮询兜底完成。",
-          steps: mergeAsyncJobSteps(existing.inputContext?.asyncAiJob?.steps, [
-            buildAsyncJobStep("read_context", "读取客户上下文", "done", customer ? `已读取 ${customer.name} 的客户上下文。` : "已读取当前上下文。"),
-            buildAsyncJobStep("call_model", "生成兜底结果", "done", "后台任务未及时写回，已生成可用兜底结果。"),
-            buildAsyncJobStep("write_result", "写入生成结果", "done", "已保存到生成历史。")
-          ])
-        }
-      },
-      prompt: generation.prompt,
-      modelName: `${generation.modelName || "本地规则生成"} / 线上兜底`,
-      outputContent: generation.outputContent,
-      title: generation.title || existing.title,
-      updatedAt: finishedAt
-    });
-
-    const actor = {
-      user: nextDb.users.find((user) => user.id === (record.userId || record.inputContext?.generatedBy)) || { id: "system", name: "系统任务", role: "admin" }
-    };
-    saveCustomerMemoryFromGeneration(nextDb, {
-      customerId,
-      userId: record.userId || actor.user.id,
-      type: record.generationType,
-      saveToCustomer: false
-    }, actor, generation, saved);
-
-    if (record.generationType === "follow_summary" && existing.inputContext?.extra?.followRecordId) {
-      const follow = nextDb.followRecords.find((item) => item.id === existing.inputContext.extra.followRecordId);
-      if (follow) {
-        follow.aiSummary = generation.outputContent;
-        follow.updatedAt = finishedAt;
-      }
-    }
-
-    if (record.generationType === "failure_report" && existing.inputContext?.extra?.failureReportId) {
-      const report = nextDb.failureReports.find((item) => item.id === existing.inputContext.extra.failureReportId);
-      if (report) {
-        report.aiReport = generation.outputContent;
-        report.reactivateSuggestion = extractReactivateSuggestion(generation.outputContent || "");
-        report.status = "completed";
-        report.updatedAt = finishedAt;
-      }
-    }
-
-    return saved;
+async function recoverStuckCrmGenerationJob(record) {
+  await markCrmGenerationJobFailed({
+    recordId: record.id,
+    title: record.title,
+    errorText: "后台任务未及时写回，系统已停止本地兜底。请重新生成，或检查模型、API Key 与 Netlify 后台函数日志。"
   });
 }
 
@@ -2497,13 +2557,11 @@ function buildChatProcessPlan({ body = {}, db }) {
 
 function isSimpleChatQuery(message = "") {
   const text = String(message || "").trim();
-  if (!text) return true;
-  if (text.length <= 8 && /^(hi|hello|hey|嗨|哈喽|你好|你好呀|嗨呀|在吗|在不|有人吗|早上好|下午好|晚上好)$/i.test(text)) return true;
-  if (/^(谢谢|辛苦了|好的|收到|ok|okay|ok了|明白了|了解了|拜拜|再见)$/i.test(text)) return true;
-  if (/^(你是谁|你能做什么|你可以做什么|怎么用|怎么使用)$/.test(text)) return true;
+  if (!text) return false;
   if (/^[\p{P}\p{S}\s]+$/u.test(text)) return true;
-  if (text.length <= 12 && !/(客户|方案|需求|跟进|分析|生成|报价|技能|skill|知识库|RAG|图片|交互图|PPT|总结|复盘|阶段|会话|文档|报告|业务|项目)/i.test(text)) return true;
-  return false;
+  if (text.length > 10) return false;
+  if (/^(hi|hello|hey|嗨|哈喽|哈喽呀|你好|你好呀|嗨呀|在吗|在不|有人吗|早上好|下午好|晚上好)$/i.test(text)) return true;
+  return /^(谢谢|谢谢你|谢了|辛苦了|好的|好|收到|ok|okay|ok了|明白了|了解了|嗯|嗯嗯|可以|行|行的|拜拜|再见)$/i.test(text);
 }
 
 function buildRuntimeStreamConfig(config = {}, body = {}, processPlan = {}) {
@@ -2549,8 +2607,21 @@ function isServerlessRuntime() {
   );
 }
 
+function isEnabledEnvFlag(name) {
+  return /^(1|true|yes|on)$/i.test(String(process.env[name] || "").trim());
+}
+
+function isServerlessChatFastPathEnabled() {
+  return isEnabledEnvFlag("AI_CHAT_FAST_PATH_ENABLED");
+}
+
+function isServerlessChatBackgroundQueueEnabled() {
+  return isEnabledEnvFlag("AI_CHAT_BACKGROUND_QUEUE_ENABLED");
+}
+
 function shouldUseServerlessQuickCustomerChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
+  if (!isServerlessChatFastPathEnabled()) return false;
   if (String(body.type || "chat") !== "chat") return false;
   if (!body.customerId) return false;
   if (body.skillId) return false;
@@ -2562,6 +2633,7 @@ function shouldUseServerlessQuickCustomerChat(body = {}, processPlan = {}) {
 
 function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
+  if (!isServerlessChatFastPathEnabled()) return false;
   if (String(body.type || "chat") !== "chat") return false;
   if (body.customerId) return false;
   if (body.skillId) return false;
@@ -2572,6 +2644,7 @@ function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {
 
 function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
+  if (!isServerlessChatBackgroundQueueEnabled()) return false;
   if (String(body.type || "chat") !== "chat") return false;
   if (body.customerId) return false;
   if (body.skillId) return false;
@@ -2582,6 +2655,7 @@ function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {
 
 function shouldQueueServerlessDefaultGeneralChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
+  if (!isServerlessChatBackgroundQueueEnabled()) return false;
   if (String(body.type || "chat") !== "chat") return false;
   if (body.customerId) return false;
   if (body.skillId) return false;
@@ -2592,12 +2666,29 @@ function shouldQueueServerlessDefaultGeneralChat(body = {}, processPlan = {}) {
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
+  if (!isServerlessChatFastPathEnabled()) return false;
   if (String(body.type || "chat") !== "chat") return false;
   if (!body.customerId) return false;
   if (body.skillId) return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.used_skill || processPlan?.metadata?.image_job) return false;
   return isDefaultWorkspaceDocumentIntent(body.message);
+}
+
+function shouldQueueServerlessChatGeneration(body = {}, processPlan = {}) {
+  if (!isServerlessRuntime()) return false;
+  if (String(body.type || "chat") !== "chat") return false;
+  if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
+  if (processPlan?.metadata?.image_job) return false;
+  if (body.skillId) return false;
+  if (body.customerId) return false;
+  if (String(body.modelId || "") === "model_local") return false;
+  if (processPlan?.metadata?.customer_intent === "customer_work") return false;
+  if (processPlan?.metadata?.default_intent === "customer_work") return false;
+  if (Array.isArray(body.extraContext?.chatAttachments) && body.extraContext.chatAttachments.length) return true;
+
+  const intent = processPlan?.metadata?.default_intent || "";
+  return ["document_generation", "planning", "work_analysis"].includes(intent);
 }
 
 function buildServerlessDefaultWorkspaceChatGeneration({ db, body = {}, actor, processPlan = {} }) {
@@ -3499,6 +3590,8 @@ function isDefaultWorkspaceDocumentIntent(message = "") {
   if (!text) return false;
   const documentTarget = /(需求文档|需求说明|需求清单|prd|产品需求|功能清单|业务清单|模块清单|方案|方案大纲|解决方案|报告|文档|PPT|ppt|结构稿|大纲|计划书|流程图|说明书|模板|话术|提示词)/i;
   const documentAction = /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/;
+  const featureInventoryQuestion = /(小程序|系统|平台|应用|app|后台|管理端|用户端|客户端|商城|CRM|crm|SaaS|saas|网站|官网|门户).{0,30}(有哪些|包含哪些|需要哪些|应该有哪些|要哪些|做哪些|支持哪些).{0,12}(功能|模块|页面|菜单)|(功能|模块|页面|菜单).{0,12}(有哪些|怎么设计|如何设计|怎么规划|如何规划)/i;
+  if (featureInventoryQuestion.test(text)) return true;
   return documentTarget.test(text) && documentAction.test(text);
 }
 
@@ -3534,17 +3627,12 @@ function normalizeMatchText(value = "") {
 function buildSimpleChatAnswer(body = {}, db) {
   const message = String(body.message || "").trim();
   const customer = body.customerId ? db.customers.find((item) => item.id === body.customerId) || null : null;
-  if (/^(谢谢|辛苦了|好的|收到|ok|okay|ok了|明白了|了解了|拜拜|再见)$/i.test(message)) {
+  if (/^(谢谢|谢谢你|谢了|辛苦了|好的|好|收到|ok|okay|ok了|明白了|了解了|嗯|嗯嗯|可以|行|行的|拜拜|再见)$/i.test(message)) {
     return customer
       ? `不客气，我会继续围绕「${customer.name}」的上下文帮你推进。`
       : "不客气，有需要继续直接发我。";
   }
-  if (/^(你是谁|你能做什么|你可以做什么|怎么用|怎么使用)$/.test(message)) {
-    return customer
-      ? `我是你的 AICRM 助手，当前只围绕「${customer.name}」的客户上下文工作。你可以直接让我分析客户、生成方案、整理文档或输出下一步跟进建议。`
-      : "我是 AICRM 助手，你可以直接让我分析客户、生成方案、整理文档或输出可复制的话术。";
-  }
-  if (/^(hi|hello|hey|嗨|哈喽|你好|在吗|在不|有人吗)$/i.test(message)) {
+  if (/^(hi|hello|hey|嗨|哈喽|哈喽呀|你好|你好呀|嗨呀|在吗|在不|有人吗|早上好|下午好|晚上好)$/i.test(message)) {
     return customer
       ? `你好，我在。当前正在围绕「${customer.name}」继续处理，你可以直接告诉我下一步要分析什么。`
       : "你好，我在。你可以直接告诉我要分析哪个客户、生成什么内容，或者要我帮你整理成文档。";

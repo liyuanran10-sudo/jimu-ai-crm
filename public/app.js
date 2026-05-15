@@ -232,6 +232,7 @@ async function loadBootstrap() {
     state.selectedCustomerId = state.db.customers[0]?.id || "";
   }
   hydratePendingImageJobs();
+  hydrateChatMessagesFromRecords();
   ensureChatSessionState();
 }
 
@@ -240,8 +241,12 @@ function hydratePendingImageJobs() {
   const helpItems = getHelpCenterItems();
   for (const item of helpItems) {
     if (item.status === "generating") {
+      const wasTracked = Boolean(state.pendingImageJobs[item.key] || state.helpCenterTaskStatuses[item.key]);
       state.pendingImageJobs[item.key] = state.pendingImageJobs[item.key] || "generating";
       state.helpCenterTaskStatuses[item.key] = state.helpCenterTaskStatuses[item.key] || item.status;
+      if (!wasTracked) {
+        pushHelpCenterNotice(item);
+      }
     }
   }
   if (Object.keys(state.pendingImageJobs).length) startImageJobPolling();
@@ -3688,7 +3693,7 @@ async function submitChat(form) {
 
   ensureChatSessionState();
   let activeSession = getActiveChatSession();
-  const isSimpleMessage = isSimpleChatMessage(message);
+  const isSimpleMessage = isSimpleChatMessage(message, { hasAttachments: chatAttachments.length > 0 });
   const selectedSkillId = state.chatSkillExplicit
     ? (document.querySelector("#chat-skill")?.value || state.aiSkillId || activeSession.skillId || "")
     : "";
@@ -3825,11 +3830,25 @@ async function submitChat(form) {
       assistantMessage.content = data.generation.outputContent;
     }
     if (data.record?.id && shouldRenderSkillResultCard({ skillId, record: data.record, toolMode })) {
+      const recordStatus = getRecordJobStatus(data.record);
+      const isQueuedRecord = ["generating", "queued", "running", "pending"].includes(String(recordStatus || "").toLowerCase());
       assistantMessage.skillCard = buildSkillResultCard(data.record, activeSession, customerId);
       if (skillId) {
-        assistantMessage.content = `已完成「${generationTypes[data.record.generationType] || "Skill 输出"}」，我把完整内容整理成了文档卡片。点击下方卡片可以进入全屏文档查看、复制、反馈或保存到客户档案。`;
+        assistantMessage.content = isQueuedRecord
+          ? (data.generation?.outputContent || "AI 长任务已进入后台远程生成队列，完成后会在帮助中心提醒，并自动回填到当前对话。")
+          : `已完成「${generationTypes[data.record.generationType] || "Skill 输出"}」，我把完整内容整理成了文档卡片。点击下方卡片可以进入全屏文档查看、复制、反馈或保存到客户档案。`;
       } else if (data.record.generationType === "chat_image") {
         assistantMessage.content = "图片生成任务已提交到后台。你可以继续对话，完成后系统会在帮助中心提醒。";
+      }
+    }
+    if (data.record?.id) {
+      assistantMessage.recordId = data.record.id;
+      assistantMessage.meta = {
+        ...(assistantMessage.meta || {}),
+        recordId: data.record.id
+      };
+      if (isGeneratingJobStatus(getRecordJobStatus(data.record))) {
+        registerHelpCenterRecord(data.record.id, data.record);
       }
     }
     assistantMessage.streaming = false;
@@ -3841,8 +3860,8 @@ async function submitChat(form) {
       const record = state.db.aiGenerationRecords.find((item) => item.id === data.record.id);
       if (record?.customerId) setHistoryPageForRecord(record.id, record.customerId);
       if (!record?.customerId) state.selectedHistoryId = "";
-      if (data.image?.status === "generating" || getRecordJobStatus(record) === "generating") {
-        registerImageJob(data.record.id);
+      if (data.image?.status === "generating" || isGeneratingJobStatus(getRecordJobStatus(record)) || isGeneratingJobStatus(getRecordJobStatus(data.record))) {
+        registerImageJob(data.record.id, record || data.record);
         showToast(data.image?.status === "generating" ? "图片已进入后台生成队列，完成后会自动通知" : "AI 长任务已进入后台生成队列，完成后会自动通知", 4600);
       }
     }
@@ -3875,14 +3894,14 @@ async function submitChat(form) {
   }
 }
 
-function isSimpleChatMessage(message = "") {
+function isSimpleChatMessage(message = "", options = {}) {
+  if (options.hasAttachments) return false;
   const text = String(message || "").trim();
-  if (!text) return true;
-  if (/^(hi|hello|hey|嗨|哈喽|你好|在吗|在不|有人吗)$/i.test(text)) return true;
-  if (/^(谢谢|辛苦了|好的|收到|ok|okay|ok了|明白了|了解了|拜拜|再见)$/i.test(text)) return true;
-  if (/^(你是谁|你能做什么|你可以做什么|怎么用|怎么使用)$/.test(text)) return true;
+  if (!text) return false;
   if (/^[\p{P}\p{S}\s]+$/u.test(text)) return true;
-  return text.length <= 12 && !/(客户|方案|需求|跟进|分析|生成|报价|技能|skill|知识库|RAG|图片|交互图|PPT|总结|复盘|阶段|会话|文档|报告|业务|项目)/i.test(text);
+  if (text.length > 10) return false;
+  if (/^(hi|hello|hey|嗨|哈喽|哈喽呀|你好|你好呀|嗨呀|在吗|在不|有人吗|早上好|下午好|晚上好)$/i.test(text)) return true;
+  return /^(谢谢|谢谢你|谢了|辛苦了|好的|好|收到|ok|okay|ok了|明白了|了解了|嗯|嗯嗯|可以|行|行的|拜拜|再见)$/i.test(text);
 }
 
 function shouldRenderSkillResultCard({ skillId, record, toolMode }) {
@@ -4701,15 +4720,103 @@ function focusHistoryRecord(recordId, customerId = "") {
   state.detailTab = "history";
 }
 
-function registerImageJob(recordId) {
-  registerHelpCenterRecord(recordId);
+function registerImageJob(recordId, record = null) {
+  registerHelpCenterRecord(recordId, record);
 }
 
-function registerHelpCenterRecord(recordId) {
+function registerHelpCenterRecord(recordId, recordOverride = null) {
   if (!recordId) return;
   state.pendingImageJobs[recordId] = "generating";
   state.helpCenterTaskStatuses[recordId] = "generating";
+  const record = recordOverride || state.db?.aiGenerationRecords?.find((item) => item.id === recordId);
+  if (record) {
+    pushHelpCenterNotice({
+      key: record.id,
+      id: record.id,
+      kind: "record",
+      kindLabel: generationTypes[record.generationType] || "AI 生成",
+      title: record.title || generationTypes[record.generationType] || "AI 生成",
+      customerId: record.customerId || "",
+      customerName: record.customerId ? findCustomerName(record.customerId) : "默认 AI 工作台",
+      status: "generating",
+      statusLabel: getRecordJobStatusLabel("generating"),
+      createdAt: record.createdAt || record.updatedAt || new Date().toISOString(),
+      preview: buildHelpCenterPreview(record.outputContent || "", "generating", record.generationType, "record"),
+      steps: getRecordJobSteps(record),
+      recordId: record.id,
+      feedbackId: ""
+    });
+  }
   startImageJobPolling();
+}
+
+function hydrateChatMessagesFromRecords() {
+  if (!state.db || !state.chatSessions) return false;
+  let changed = false;
+  const recordMap = new Map((state.db.aiGenerationRecords || []).map((record) => [record.id, record]));
+  for (const sessionGroup of Object.values(state.chatSessions || {})) {
+    for (const chatSession of sessionGroup || []) {
+      const sessionRecordId = String(chatSession.lastRecordId || "").trim();
+      for (const message of chatSession.messages || []) {
+        if (message?.role !== "assistant") continue;
+        const pendingPlaceholder = /后台远程生成|后台生成中|后台任务|帮助中心提醒|已提交后台生成|已提交后台远程生成/.test(String(message.content || ""));
+        const recordId = message.recordId
+          || message.meta?.recordId
+          || (pendingPlaceholder ? sessionRecordId : "");
+        if (!recordId) continue;
+        const record = recordMap.get(recordId);
+        if (!record) continue;
+        const status = getRecordJobStatus(record);
+        const finalContent = String(record.outputContent || "");
+        if (finalContent && message.content !== finalContent && status !== "generating") {
+          message.content = finalContent;
+          changed = true;
+        }
+        if (status && status !== "generating") {
+          if (message.streaming) {
+            message.streaming = false;
+            changed = true;
+          }
+          if (message.status) {
+            message.status = "";
+            changed = true;
+          }
+          if (pendingPlaceholder && record.outputContent) {
+            pushHelpCenterNotice({
+              key: record.id,
+              id: record.id,
+              kind: "record",
+              kindLabel: generationTypes[record.generationType] || "AI 生成",
+              title: record.title || generationTypes[record.generationType] || "AI 生成",
+              customerId: record.customerId || "",
+              customerName: record.customerId ? findCustomerName(record.customerId) : "默认 AI 工作台",
+              status: normalizeHelpCenterStatus(status),
+              statusLabel: getRecordJobStatusLabel(status),
+              createdAt: record.createdAt || record.updatedAt || new Date().toISOString(),
+              preview: buildHelpCenterPreview(record.outputContent || "", status, record.generationType, "record"),
+              steps: getRecordJobSteps(record),
+              recordId: record.id,
+              feedbackId: ""
+            });
+          }
+        }
+        if ((message.skillCard || message.meta?.skillId) && status !== "generating") {
+          const sessionContext = findChatSessionById(message.meta?.sessionId || chatSession?.id) || chatSession;
+          const customerId = record.customerId || message.meta?.customerId || sessionContext?.customerId || "";
+          const nextCard = buildSkillResultCard(record, sessionContext, customerId);
+          if (nextCard) {
+            message.skillCard = nextCard;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  if (changed) {
+    persistChatSessions();
+    queueChatMessagesUpdate();
+  }
+  return changed;
 }
 
 function registerReportFeedbackJob(feedbackId) {
@@ -4784,6 +4891,10 @@ function getRecordJobStatus(record) {
     || record?.inputContext?.interactionImage?.imageStatus
     || record?.inputContext?.defaultImage?.imageStatus
     || "";
+}
+
+function isGeneratingJobStatus(status = "") {
+  return ["generating", "queued", "running", "pending"].includes(String(status || "").toLowerCase());
 }
 
 function getInteractionBoardStatus(record = {}) {
@@ -4900,7 +5011,7 @@ function getProcessStatusLabel(status = "") {
 function getHelpCenterBadgeCount() {
   if (!state.user || !state.db) return 0;
   const pendingCount = getHelpCenterItems().filter((item) => item.status === "generating").length;
-  return pendingCount + state.helpCenterNotices.length;
+  return Math.max(pendingCount, Object.keys(state.pendingImageJobs || {}).length) + state.helpCenterNotices.length;
 }
 
 function normalizeHelpCenterStatus(status = "") {
@@ -4979,9 +5090,11 @@ function pushHelpCenterNotice(item) {
   state.helpCenterNotices.unshift(notice);
   state.helpCenterNotices = state.helpCenterNotices.slice(0, 3);
   clearHelpCenterNoticeTimer(notice.id);
-  helpCenterNoticeTimers.set(notice.id, window.setTimeout(() => {
-    dismissHelpCenterNotice(notice.id);
-  }, 12000));
+  if (notice.status !== "generating") {
+    helpCenterNoticeTimers.set(notice.id, window.setTimeout(() => {
+      dismissHelpCenterNotice(notice.id);
+    }, 12000));
+  }
   render();
 }
 

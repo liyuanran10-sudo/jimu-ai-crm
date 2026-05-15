@@ -1272,7 +1272,7 @@ async function getCrmBlobStore() {
   if (!process.env.NETLIFY || process.env.NETLIFY_BLOBS_DISABLED === "true") return null;
   try {
     const { getStore } = await import("@netlify/blobs");
-    return getStore("aicrm");
+    return getStore({ name: "aicrm", consistency: "strong" });
   } catch {
     return null;
   }
