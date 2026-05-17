@@ -7822,6 +7822,43 @@ body {
   line-height: 1.55;
 }
 
+.chatEvidencePanel {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.evidenceBlock {
+  border: 1px solid rgba(216, 226, 240, 0.9);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #ffffff;
+  color: #475467;
+}
+
+.evidenceBlock strong {
+  display: block;
+  margin: 0 0 5px;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.evidenceBlock p {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.evidenceBlock small {
+  display: block;
+  margin-top: 5px;
+  color: #98a2b3;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .chatProcessPanel > details > summary::-webkit-details-marker,
 .processStep > summary::-webkit-details-marker {
   display: none;
@@ -11417,6 +11454,17 @@ textarea:focus {
   color: #667085 !important;
   font-size: 12px !important;
   line-height: 1.6 !important;
+}
+
+.doubaoChatLayout .chatEvidencePanel {
+  margin: 10px 0 !important;
+}
+
+.doubaoChatLayout .evidenceBlock {
+  border-color: rgba(216, 226, 240, 0.9) !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: none !important;
 }
 
 .doubaoChatLayout .manusProcessPanel > details > summary::after {

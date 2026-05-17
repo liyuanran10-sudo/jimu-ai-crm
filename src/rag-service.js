@@ -29,7 +29,10 @@ export function buildRagContext({ db, customer, skill, generationType, message, 
       searchedAt,
       query: plan.query,
       knowledgeBaseIds: plan.knowledgeBaseIds,
-      matches: []
+      matches: [],
+      citations: [],
+      quality: buildRagQuality({ plan, matches: [], totalChunks: 0 }),
+      diagnostics: buildRagDiagnostics({ plan, matches: [], totalChunks: 0 })
     };
   }
 
@@ -71,6 +74,7 @@ export function buildRagContext({ db, customer, skill, generationType, message, 
       text: item.text
     }));
 
+  const quality = buildRagQuality({ plan, matches, totalChunks: chunks.length });
   return {
     enabled: true,
     used: Boolean(matches.length),
@@ -78,8 +82,85 @@ export function buildRagContext({ db, customer, skill, generationType, message, 
     searchedAt,
     query: plan.query,
     knowledgeBaseIds: plan.knowledgeBaseIds,
-    matches
+    matches,
+    citations: buildRagCitations(matches),
+    quality,
+    diagnostics: buildRagDiagnostics({ plan, matches, totalChunks: chunks.length, quality })
   };
+}
+
+function buildRagCitations(matches = []) {
+  return ensureArray(matches).map((item, index) => ({
+    id: `rag:${item.knowledgeBaseId}:${item.documentId}:${item.chunkId}`,
+    index: index + 1,
+    label: `${item.knowledgeBaseName || "知识库"} / ${item.documentName || "未命名文档"}`,
+    knowledgeBaseId: item.knowledgeBaseId,
+    knowledgeBaseName: item.knowledgeBaseName,
+    documentId: item.documentId,
+    documentName: item.documentName,
+    chunkId: item.chunkId,
+    score: item.score,
+    relevance: Math.round(computeMatchStrength(item) * 100),
+    excerpt: String(item.text || "").replace(/\s+/g, " ").slice(0, 220)
+  }));
+}
+
+function buildRagQuality({ plan = {}, matches = [], totalChunks = 0 } = {}) {
+  if (!plan.shouldRun) {
+    return {
+      level: "skipped",
+      score: 0,
+      summary: plan.reason || "本轮未执行知识库检索。"
+    };
+  }
+  if (!matches.length) {
+    return {
+      level: "miss",
+      score: 0,
+      summary: "已执行知识库检索，但没有达到相关性门槛的片段。"
+    };
+  }
+  const top = matches[0] || {};
+  const strength = computeMatchStrength(top);
+  const diversity = new Set(matches.map((item) => `${item.knowledgeBaseId}:${item.documentId}`)).size;
+  const coverage = Math.min(1, matches.length / 4) * 0.22 + Math.min(1, diversity / 3) * 0.18;
+  const score = Math.min(1, strength * 0.6 + coverage);
+  const level = score >= 0.72 ? "strong" : score >= 0.46 ? "medium" : "weak";
+  return {
+    level,
+    score: Number(score.toFixed(2)),
+    summary: {
+      strong: "知识库命中质量较高，可作为回答的重要依据。",
+      medium: "知识库有可参考资料，回答中需要保留来源和待确认边界。",
+      weak: "知识库命中较弱，只能作为辅助参考，不能当作强事实。"
+    }[level],
+    topScore: top.score || 0,
+    matchCount: matches.length,
+    sourceDiversity: diversity,
+    totalChunks
+  };
+}
+
+function buildRagDiagnostics({ plan = {}, matches = [], totalChunks = 0, quality = null } = {}) {
+  return {
+    queryLength: String(plan.query || "").length,
+    searchedKnowledgeBaseCount: ensureArray(plan.knowledgeBaseIds).length,
+    totalChunks,
+    matchedChunks: matches.length,
+    requiredAnchorTokens: ensureArray(plan.requiredAnchorTokens).length,
+    anchorTokens: ensureArray(plan.anchorTokens).length,
+    qualityLevel: quality?.level || "skipped",
+    policy: plan.allowGeneralKnowledge
+      ? "允许使用全局知识库作为通用参考。"
+      : "要求知识库片段与客户/任务锚点相关，避免无关资料乱入。"
+  };
+}
+
+function computeMatchStrength(item = {}) {
+  const semantic = Math.min(1, Number(item.score || 0) * 1.4);
+  const lexical = Math.min(1, Number(item.lexicalOverlap || 0) / 8);
+  const anchor = Math.min(1, (Number(item.anchorOverlap || 0) + Number(item.requiredAnchorOverlap || 0) + Number(item.nameOverlap || 0)) / 6);
+  return Math.min(1, semantic * 0.44 + lexical * 0.34 + anchor * 0.22);
 }
 
 function buildRagPlan({ db, customer, skill, generationType, message, extraContext }) {

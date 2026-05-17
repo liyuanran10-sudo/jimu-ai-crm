@@ -3826,6 +3826,10 @@ async function submitChat(form) {
           };
         }
         const remoteFailure = payload?.generation?.inputContext?.remoteModelFailure;
+        const knowledgeBase = payload?.generation?.inputContext?.knowledgeBase;
+        if (knowledgeBase) {
+          assistantMessage.knowledgeBase = knowledgeBase;
+        }
         if (remoteFailure?.failed) {
           assistantMessage.remoteFailure = remoteFailure;
           assistantMessage.metadata = {
@@ -5445,9 +5449,10 @@ function renderChatMessageBody(item) {
   }
 
   const processHtml = renderChatProcessPanel(item);
+  const evidenceHtml = renderChatEvidencePanel(item);
   if (item.remoteFailure || isRemoteFailureContent(item.content)) {
     const failureHtml = renderChatRemoteFailure(item);
-    return item.streaming ? `${processHtml}${failureHtml}` : `${processHtml}${failureHtml}`;
+    return item.streaming ? `${processHtml}${evidenceHtml}${failureHtml}` : `${processHtml}${evidenceHtml}${failureHtml}`;
   }
   const finalAnswer = String(item.content || "").trim()
     ? `<div class="finalAnswerPane markdownPane chatMarkdown ${item.streaming ? "streamingMarkdown" : ""}">${markdownToHtml(item.content)}</div>`
@@ -5460,9 +5465,47 @@ function renderChatMessageBody(item) {
     const status = item.content && item.status
       ? `<div class="streamStatus">${escapeHtml(item.status)}</div>`
       : "";
-    return `${processHtml}${finalAnswer}${typing}${status}`;
+    return `${processHtml}${evidenceHtml}${finalAnswer}${typing}${status}`;
   }
-  return `${processHtml}${finalAnswer || `<div class="finalAnswerPane markdownPane chatMarkdown">${markdownToHtml("暂无内容")}</div>`}`;
+  return `${processHtml}${evidenceHtml}${finalAnswer || `<div class="finalAnswerPane markdownPane chatMarkdown">${markdownToHtml("暂无内容")}</div>`}`;
+}
+
+function renderChatEvidencePanel(item = {}) {
+  const skill = item.agentTrace?.skillManifest || null;
+  const kb = item.knowledgeBase || null;
+  const rows = [];
+  if (skill) {
+    const sections = Array.isArray(skill.output?.sections) ? skill.output.sections.slice(0, 5) : [];
+    const checklist = Array.isArray(skill.output?.qualityChecklist) ? skill.output.qualityChecklist.slice(0, 3) : [];
+    rows.push(`
+      <div class="evidenceBlock">
+        <strong>Skill 能力包</strong>
+        <p>${escapeHtml(skill.name || "已选择 Skill")} · ${escapeHtml(skill.toolLabel || skill.toolType || "模型生成")} · ${escapeHtml(skill.trigger?.mode === "manual" ? "手动执行" : "自动命中")}</p>
+        ${sections.length ? `<small>输出章节：${escapeHtml(sections.join("、"))}</small>` : ""}
+        ${checklist.length ? `<small>质量要求：${escapeHtml(checklist.join("；"))}</small>` : ""}
+      </div>
+    `);
+  }
+  if (kb && (kb.used || kb.quality || kb.reason)) {
+    const quality = kb.quality || {};
+    const citations = Array.isArray(kb.citations) ? kb.citations.slice(0, 3) : [];
+    const levelLabel = {
+      strong: "强命中",
+      medium: "可参考",
+      weak: "弱参考",
+      miss: "未命中",
+      skipped: "未执行"
+    }[quality.level] || (kb.used ? "已命中" : "未执行");
+    rows.push(`
+      <div class="evidenceBlock">
+        <strong>RAG 资料状态</strong>
+        <p>${escapeHtml(levelLabel)}${Number.isFinite(Number(quality.score)) ? ` · ${Math.round(Number(quality.score) * 100)}%` : ""} · ${escapeHtml(kb.reason || quality.summary || "")}</p>
+        ${citations.length ? `<small>引用：${escapeHtml(citations.map((item) => `${item.label || item.documentName || "资料"} ${item.relevance ? `${item.relevance}%` : ""}`).join("；"))}</small>` : ""}
+      </div>
+    `);
+  }
+  if (!rows.length) return "";
+  return `<section class="chatEvidencePanel" aria-label="上下文与资料状态">${rows.join("")}</section>`;
 }
 
 function isRemoteFailureContent(content = "") {
@@ -5553,12 +5596,14 @@ function normalizeAgentTrace(item = {}) {
   const domain = trace.domain || {};
   const contextPlan = trace.contextPlan || {};
   const output = trace.output || {};
+  const skillManifest = trace.skillManifest || {};
   const policy = trace.policy || {};
   const tools = Array.isArray(trace.tools) ? trace.tools : [];
   const intentLabel = intent.label || metadata.agent_intent_label || metadata.default_intent_label || metadata.referenced_customer_name || "";
   const actionLabel = action.label || metadata.agent_action_label || "";
   const domainLabel = domain.label || "";
   const outputLabel = output.label || "";
+  const skillLabel = skillManifest.name || "";
   const executionMode = policy.executionMode || metadata.agent_execution_mode || "";
   const responseMode = policy.responseMode || metadata.agent_response_mode || "";
   const confidence = Number(intent.confidence || metadata.agent_confidence || 0);
@@ -5568,6 +5613,7 @@ function normalizeAgentTrace(item = {}) {
     actionLabel,
     domainLabel,
     outputLabel,
+    skillLabel,
     contextScopes: Array.isArray(contextPlan.scopes) ? contextPlan.scopes : (metadata.agent_context_scopes || []),
     confidence,
     executionMode,
@@ -5586,6 +5632,7 @@ function renderAgentTraceBar(trace, steps = []) {
   if (trace.confidence) chips.push(["置信度", `${Math.round(trace.confidence * 100)}%`]);
   if (trace.executionMode) chips.push(["模式", trace.executionMode === "background" ? "后台完整生成" : "同步回答"]);
   if (trace.outputLabel || trace.responseMode) chips.push(["呈现", trace.outputLabel || (trace.responseMode === "document_card" ? "文档卡片" : trace.responseMode === "image_job" ? "图片任务" : "文本回答")]);
+  if (trace.skillLabel) chips.push(["Skill", trace.skillLabel]);
   const contextScopes = (trace.contextScopes || []).map(formatAgentContextScope).filter(Boolean);
   const toolNames = trace.tools.map((tool) => tool.name).filter(Boolean);
   const reason = trace.policyReason || trace.intentReason || "";

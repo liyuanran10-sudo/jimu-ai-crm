@@ -1433,7 +1433,8 @@ function optimizeContextForAi({ context, generationType, customer, skill, messag
         name: skill.name,
         toolType: skill.toolType || "",
         description: limitText(skill.description, 180)
-      } : null
+      } : null,
+      skillManifest: context.extra?.agentDecision?.routing?.skillManifest ? compactSkillManifest(context.extra.agentDecision.routing.skillManifest) : null
     }
   };
 
@@ -1452,6 +1453,35 @@ function optimizeContextForAi({ context, generationType, customer, skill, messag
     policy: "只在模型请求中发送任务相关摘要；完整客户数据仍保存在 CRM 数据库。"
   };
   return fitted;
+}
+
+function compactSkillManifest(manifest = {}) {
+  return removeEmpty({
+    id: manifest.id,
+    name: manifest.name,
+    toolType: manifest.toolType,
+    toolLabel: manifest.toolLabel,
+    trigger: manifest.trigger ? {
+      mode: manifest.trigger.mode,
+      confidence: manifest.trigger.confidence,
+      autoPolicy: limitText(manifest.trigger.autoPolicy, 160)
+    } : null,
+    context: manifest.context ? {
+      requiresCustomer: manifest.context.requiresCustomer,
+      inputFields: ensureArray(manifest.context.inputFields).slice(0, 8),
+      knowledgeBaseIds: ensureArray(manifest.context.knowledgeBaseIds).slice(0, 8),
+      usesRag: manifest.context.usesRag,
+      usesWeb: manifest.context.usesWeb,
+      usesImage: manifest.context.usesImage,
+      usesPpt: manifest.context.usesPpt
+    } : null,
+    output: manifest.output ? {
+      mode: manifest.output.mode,
+      sections: ensureArray(manifest.output.sections).slice(0, 10),
+      qualityChecklist: ensureArray(manifest.output.qualityChecklist).slice(0, 6)
+    } : null,
+    guardrails: ensureArray(manifest.guardrails).slice(0, 8)
+  });
 }
 
 function getContextProfile(generationType, customer) {
@@ -1681,6 +1711,26 @@ function compactKnowledgeBase(knowledgeBase = {}, profile) {
     searchedAt: knowledgeBase.searchedAt,
     query: limitText(knowledgeBase.query, 320),
     knowledgeBaseIds: ensureArray(knowledgeBase.knowledgeBaseIds).slice(0, 8),
+    quality: knowledgeBase.quality ? removeEmpty({
+      level: knowledgeBase.quality.level,
+      score: knowledgeBase.quality.score,
+      summary: limitText(knowledgeBase.quality.summary, 180),
+      matchCount: knowledgeBase.quality.matchCount,
+      sourceDiversity: knowledgeBase.quality.sourceDiversity
+    }) : null,
+    citations: used ? ensureArray(knowledgeBase.citations).slice(0, profile.ragMatches).map((item) => removeEmpty({
+      label: limitText(item.label, 120),
+      relevance: item.relevance,
+      score: item.score,
+      excerpt: limitText(item.excerpt, 180)
+    })) : [],
+    diagnostics: knowledgeBase.diagnostics ? removeEmpty({
+      searchedKnowledgeBaseCount: knowledgeBase.diagnostics.searchedKnowledgeBaseCount,
+      totalChunks: knowledgeBase.diagnostics.totalChunks,
+      matchedChunks: knowledgeBase.diagnostics.matchedChunks,
+      qualityLevel: knowledgeBase.diagnostics.qualityLevel,
+      policy: limitText(knowledgeBase.diagnostics.policy, 160)
+    }) : null,
     matches: used ? ensureArray(knowledgeBase.matches).slice(0, profile.ragMatches).map((item) => removeEmpty({
       knowledgeBaseName: item.knowledgeBaseName,
       documentName: item.documentName,

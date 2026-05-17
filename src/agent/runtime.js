@@ -19,6 +19,7 @@ export function buildAgentDecision({ body = {}, db = {}, user = null } = {}) {
         domain: routing.domain,
         contextPlan: routing.contextPlan,
         output: routing.output,
+        skillManifest: routing.skillManifest,
         confidence: routing.confidence,
         candidates: routing.candidates
       },
@@ -55,6 +56,14 @@ export function mergeAgentDecisionIntoProcessPlan(processPlan = {}, agentDecisio
       agent_domain: agentDecision.routing?.domain?.key || "",
       agent_context_scopes: agentDecision.routing?.contextPlan?.scopes || [],
       agent_output_mode: agentDecision.routing?.output?.mode || "",
+      agent_skill_manifest: agentDecision.routing?.skillManifest ? {
+        id: agentDecision.routing.skillManifest.id,
+        name: agentDecision.routing.skillManifest.name,
+        toolType: agentDecision.routing.skillManifest.toolType,
+        outputMode: agentDecision.routing.skillManifest.output?.mode || "",
+        usesRag: Boolean(agentDecision.routing.skillManifest.context?.usesRag),
+        usesWeb: Boolean(agentDecision.routing.skillManifest.context?.usesWeb)
+      } : null,
       agent_execution_mode: agentDecision.policy?.executionMode || "",
       agent_response_mode: agentDecision.policy?.responseMode || "",
       agent_tools: (agentDecision.tools || []).map((tool) => tool.name)

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { handleApiRequest, handleApiStreamRequest, runImageBackgroundJob } from "../src/api-routes.js";
 import { buildAgentDecision } from "../src/agent/runtime.js";
+import { buildRagContext, normalizeKnowledgeBaseDocuments } from "../src/rag-service.js";
 import { organizeContent } from "../src/organizer.js";
 import { markdownToNotionBlocks } from "../src/markdown-to-notion.js";
 
@@ -131,6 +132,47 @@ assert.equal(agentDecisionCustomer.routing.intent, "customer_talktrack");
 assert.equal(agentDecisionCustomer.routing.action.key, "analyze");
 assert.ok(agentDecisionCustomer.routing.contextPlan.scopes.includes("customer_collection"));
 assert.ok(agentDecisionCustomer.tools.some((tool) => tool.name === "crm.getCustomerContext"));
+
+const skillWithManifest = bootstrap.body.db.skills.find((skill) => /方案大纲/.test(skill.name || "")) || bootstrap.body.db.skills[0];
+const agentDecisionSkillManifest = buildAgentDecision({
+  body: {
+    type: "chat",
+    message: "按这个 Skill 输出方案",
+    skillId: skillWithManifest.id,
+    modelId: "model_local",
+    extraContext: { workspaceMode: "default_ai_workspace" }
+  },
+  db: bootstrap.body.db,
+  user: login.body.user
+});
+assert.equal(agentDecisionSkillManifest.routing.intent, "skill_execution");
+assert.ok(agentDecisionSkillManifest.routing.skillManifest);
+assert.equal(agentDecisionSkillManifest.routing.skillManifest.trigger.manual, true);
+assert.ok(agentDecisionSkillManifest.routing.skillManifest.output.qualityChecklist.length >= 3);
+
+const ragDb = {
+  knowledgeBases: [{
+    id: "kb_test",
+    name: "测试知识库",
+    status: "enabled",
+    documents: normalizeKnowledgeBaseDocuments([], [{
+      fileName: "AI CRM话术.md",
+      text: "AI CRM 客户跟进话术知识库：客户停滞时先确认业务目标、预算口径、决策链和下一步材料。销售需要输出可复制话术和风险提醒。"
+    }])
+  }],
+  customerFiles: []
+};
+const ragContext = buildRagContext({
+  db: ragDb,
+  customer: null,
+  skill: { toolType: "rag", knowledgeBaseIds: ["kb_test"] },
+  generationType: "chat",
+  message: "根据知识库整理 AI CRM 客户跟进话术",
+  extraContext: {}
+});
+assert.equal(ragContext.used, true);
+assert.ok(["strong", "medium", "weak"].includes(ragContext.quality.level));
+assert.ok(ragContext.citations.length >= 1);
 
 const originalServerlessRuntime = process.env.JIMU_SERVERLESS_RUNTIME;
 const originalFastPathFlag = process.env.AI_CHAT_FAST_PATH_ENABLED;

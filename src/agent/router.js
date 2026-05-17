@@ -1,3 +1,5 @@
+import { buildSkillManifest } from "./skill-manifest.js";
+
 const INTENT_LABELS = {
   customer_analysis: "客户分析",
   customer_talktrack: "客户话术",
@@ -131,6 +133,12 @@ export function routeAgentIntent({ body = {}, db = {} } = {}) {
   const action = inferAction({ primary, message, body, skill });
   const contextPlan = inferContextPlan({ primary, candidates, body, skill, customer, hasAttachments });
   const output = inferOutputMode({ primary, action, body, skill });
+  const skillManifest = buildSkillManifest(skill, {
+    manual: Boolean(body.skillId),
+    intent: primary.intent,
+    action: action.key,
+    confidence: primary.confidence
+  });
   const toolPlan = unique([
     ...(primary.tools || []),
     ...contextPlan.tools
@@ -146,6 +154,7 @@ export function routeAgentIntent({ body = {}, db = {} } = {}) {
     domain: inferDomain({ primary, message, customer }),
     contextPlan,
     output,
+    skillManifest,
     customerBinding: primary.customerBinding || (customer ? "explicit" : "none"),
     selectedSkillId: skill?.id || "",
     selectedSkillName: skill?.name || "",

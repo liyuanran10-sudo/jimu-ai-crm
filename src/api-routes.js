@@ -3761,6 +3761,20 @@ function emitAgentDecision(send, processPlan = {}) {
       label: routing.output?.label || "",
       reason: routing.output?.reason || ""
     },
+    skillManifest: routing.skillManifest ? {
+      id: routing.skillManifest.id,
+      name: routing.skillManifest.name,
+      toolType: routing.skillManifest.toolType,
+      toolLabel: routing.skillManifest.toolLabel,
+      trigger: routing.skillManifest.trigger,
+      context: routing.skillManifest.context,
+      output: {
+        mode: routing.skillManifest.output?.mode || "",
+        sections: routing.skillManifest.output?.sections || [],
+        qualityChecklist: routing.skillManifest.output?.qualityChecklist || []
+      },
+      guardrails: routing.skillManifest.guardrails || []
+    } : null,
     policy: {
       executionMode: policy.executionMode || "",
       responseMode: policy.responseMode || "",
