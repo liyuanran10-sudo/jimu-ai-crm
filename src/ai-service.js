@@ -821,6 +821,7 @@ async function prepareCrmGeneration({ db, type, customerId, skillId, userId, mes
       message,
       skill,
       extraContext,
+      agentDecision: extraContext?.agentDecision,
       webResearch: context.webResearch,
       knowledgeBase: context.knowledgeBase
     });
@@ -1063,8 +1064,8 @@ function buildGlobalWorkspaceContext(db, globalHistory) {
   };
 }
 
-function buildDefaultAgentPlan({ db, message, skill, extraContext = {}, webResearch = {}, knowledgeBase = {} }) {
-  const intent = detectDefaultAgentIntent({ message, skill, extraContext, webResearch, knowledgeBase });
+function buildDefaultAgentPlan({ db, message, skill, extraContext = {}, agentDecision = null, webResearch = {}, knowledgeBase = {} }) {
+  const intent = detectDefaultAgentIntent({ message, skill, extraContext, agentDecision, webResearch, knowledgeBase });
   const matchingSkills = pickAgentSkills(db, intent);
   const tools = buildAgentToolSchedule({ intent, matchingSkills, webResearch, knowledgeBase });
   const needsAsyncImage = intent.intents.some((item) => item.key === "image_generation");
@@ -1111,7 +1112,10 @@ function buildDefaultAgentPlan({ db, message, skill, extraContext = {}, webResea
   };
 }
 
-function detectDefaultAgentIntent({ message, skill, extraContext = {}, webResearch = {}, knowledgeBase = {} }) {
+function detectDefaultAgentIntent({ message, skill, extraContext = {}, agentDecision = null, webResearch = {}, knowledgeBase = {} }) {
+  if (agentDecision?.routing?.intent) {
+    return buildDefaultIntentFromAgentDecision(agentDecision, webResearch, knowledgeBase);
+  }
   const text = `${message || ""} ${skill?.name || ""} ${skill?.description || ""}`.toLowerCase();
   const candidates = [];
   const add = (key, label, score, reason) => {
@@ -1124,7 +1128,7 @@ function detectDefaultAgentIntent({ message, skill, extraContext = {}, webResear
   if (/agent|意图|路由|调度|工作流|编排|manus|自动判断|策略/.test(text)) {
     add("agent_strategy", "Agent 策略", 0.9, "输入关注 Agent、意图识别、调度或工作流架构。");
   }
-  if (/知识库|rag|资料|文档|案例|引用|检索|向量|切片/.test(text) || knowledgeBase?.used) {
+  if (/知识库|rag|资料库|参考资料|引用资料|案例库|历史案例|引用|检索|向量|切片/.test(text) || knowledgeBase?.used) {
     add("rag_retrieval", "RAG 检索", knowledgeBase?.used ? 0.92 : 0.78, knowledgeBase?.used ? "知识库已经命中相关资料。" : "输入要求引用知识库、资料、文档或案例。");
   }
   if (/(需求文档|需求说明|prd|产品需求|功能清单|方案大纲|解决方案|报告|PPT|ppt|结构稿|计划书|说明书|文档)/i.test(text)
@@ -1152,6 +1156,61 @@ function detectDefaultAgentIntent({ message, skill, extraContext = {}, webResear
     intents: candidates.slice(0, 5),
     reasoning: candidates.map((item) => `${item.label}: ${item.reason}`).join(" ")
   };
+}
+
+function buildDefaultIntentFromAgentDecision(agentDecision = {}, webResearch = {}, knowledgeBase = {}) {
+  const routing = agentDecision.routing || {};
+  const candidates = ensureArray(routing.candidates).map((item) => ({
+    key: mapAgentIntentToDefaultIntentKey(item.intent),
+    label: item.label || item.intent,
+    score: item.confidence || 0,
+    reason: item.reason || ""
+  })).filter((item) => item.key);
+  const primaryKey = mapAgentIntentToDefaultIntentKey(routing.intent);
+  const primaryLabel = routing.label || {
+    customer_work: "客户推进任务",
+    general_answer: "通用咨询",
+    document_generation: "文档生成",
+    web_research: "联网调研",
+    rag_retrieval: "RAG 检索",
+    image_generation: "image2 生图",
+    task_planning: "任务规划"
+  }[primaryKey] || "通用咨询";
+  const primary = {
+    key: primaryKey,
+    label: primaryLabel,
+    score: routing.confidence || 0.62,
+    reason: routing.reason || routing.action?.reason || ""
+  };
+  const merged = [primary, ...candidates]
+    .filter((item, index, arr) => item.key && arr.findIndex((next) => next.key === item.key) === index);
+  if (knowledgeBase?.used && !merged.some((item) => item.key === "rag_retrieval")) {
+    merged.push({ key: "rag_retrieval", label: "RAG 检索", score: 0.82, reason: knowledgeBase.reason || "知识库已命中相关资料。" });
+  }
+  if (webResearch?.used && !merged.some((item) => item.key === "web_research")) {
+    merged.push({ key: "web_research", label: "联网调研", score: 0.82, reason: webResearch.reason || "联网检索已执行。" });
+  }
+  return {
+    primaryIntent: primary.label,
+    confidence: primary.score,
+    intents: merged.slice(0, 5),
+    reasoning: merged.map((item) => `${item.label}: ${item.reason}`).join(" ")
+  };
+}
+
+function mapAgentIntentToDefaultIntentKey(intent = "") {
+  const key = String(intent || "");
+  if (["customer_analysis", "customer_talktrack"].includes(key)) return "customer_work";
+  if (key === "document_generation") return "document_generation";
+  if (key === "planning") return "task_planning";
+  if (key === "work_analysis") return "task_planning";
+  if (key === "rag_answer") return "rag_retrieval";
+  if (key === "web_research") return "web_research";
+  if (key === "skill_execution") return "skill_execution";
+  if (key === "image_generation") return "image_generation";
+  if (key === "ppt_generation") return "document_generation";
+  if (key === "file_analysis") return "document_generation";
+  return "general_answer";
 }
 
 function pickAgentSkills(db, intent) {

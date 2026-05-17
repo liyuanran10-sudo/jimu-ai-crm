@@ -8,13 +8,17 @@ export function buildAgentDecision({ body = {}, db = {}, user = null } = {}) {
   const tools = resolveAgentTools({ routing, policy });
 
   return {
-    version: "agent-runtime-v1",
+    version: "agent-runtime-v2",
     routing,
     policy,
     tools,
     trace: {
       router: {
         intent: routing.intent,
+        action: routing.action,
+        domain: routing.domain,
+        contextPlan: routing.contextPlan,
+        output: routing.output,
         confidence: routing.confidence,
         candidates: routing.candidates
       },
@@ -42,10 +46,15 @@ export function mergeAgentDecisionIntoProcessPlan(processPlan = {}, agentDecisio
     agentDecision,
     metadata: {
       ...(processPlan.metadata || {}),
-      agent_runtime: agentDecision.version || "agent-runtime-v1",
+      agent_runtime: agentDecision.version || "agent-runtime-v2",
       agent_intent: agentDecision.routing?.intent || "",
       agent_intent_label: agentDecision.routing?.label || "",
       agent_confidence: agentDecision.routing?.confidence || 0,
+      agent_action: agentDecision.routing?.action?.key || "",
+      agent_action_label: agentDecision.routing?.action?.label || "",
+      agent_domain: agentDecision.routing?.domain?.key || "",
+      agent_context_scopes: agentDecision.routing?.contextPlan?.scopes || [],
+      agent_output_mode: agentDecision.routing?.output?.mode || "",
       agent_execution_mode: agentDecision.policy?.executionMode || "",
       agent_response_mode: agentDecision.policy?.responseMode || "",
       agent_tools: (agentDecision.tools || []).map((tool) => tool.name)

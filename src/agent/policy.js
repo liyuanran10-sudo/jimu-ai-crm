@@ -8,9 +8,11 @@ export function resolveAgentPolicy({ body = {}, routing = {}, user = null } = {}
   const isPpt = routing.intent === "ppt_generation";
   const isManualSkill = hasSkill;
   const isCustomerBound = hasCustomer || ["customer_analysis", "customer_talktrack"].includes(routing.intent);
+  const actionKey = routing.action?.key || "";
+  const outputMode = routing.output?.mode || "";
 
   let executionMode = "sync";
-  let responseMode = "text";
+  let responseMode = outputMode === "analysis_card" ? "text" : (outputMode || "text");
   const guardrails = [];
   const reasons = [];
 
@@ -36,11 +38,11 @@ export function resolveAgentPolicy({ body = {}, routing = {}, user = null } = {}
     reasons.push("手动选择 Skill 时优先同步执行，并以文档卡片展示结果。");
   } else if (hasCustomer || isLocalModel) {
     executionMode = "sync";
-    responseMode = "text";
+    responseMode = outputMode === "document_card" ? "document_card" : "text";
     reasons.push("客户短任务和本地模型任务同步返回，避免误入后台队列。");
-  } else if (hasAttachments || ["document_generation", "planning", "work_analysis"].includes(routing.intent)) {
+  } else if (hasAttachments || actionKey === "write" || ["document_generation", "planning", "work_analysis"].includes(routing.intent)) {
     executionMode = "background";
-    responseMode = "document_card";
+    responseMode = outputMode === "text" ? "document_card" : responseMode;
     reasons.push("远程长文档、附件解析或复杂规划任务进入后台完整生成。");
   } else if (routing.intent === "general_chat") {
     executionMode = "background";

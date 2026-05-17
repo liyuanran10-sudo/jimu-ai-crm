@@ -5549,19 +5549,30 @@ function normalizeAgentTrace(item = {}) {
   const metadata = item.metadata || {};
   const trace = item.agentTrace || {};
   const intent = trace.intent || {};
+  const action = trace.action || {};
+  const domain = trace.domain || {};
+  const contextPlan = trace.contextPlan || {};
+  const output = trace.output || {};
   const policy = trace.policy || {};
   const tools = Array.isArray(trace.tools) ? trace.tools : [];
   const intentLabel = intent.label || metadata.agent_intent_label || metadata.default_intent_label || metadata.referenced_customer_name || "";
+  const actionLabel = action.label || metadata.agent_action_label || "";
+  const domainLabel = domain.label || "";
+  const outputLabel = output.label || "";
   const executionMode = policy.executionMode || metadata.agent_execution_mode || "";
   const responseMode = policy.responseMode || metadata.agent_response_mode || "";
   const confidence = Number(intent.confidence || metadata.agent_confidence || 0);
   return {
     title: intentLabel ? `Agent · ${intentLabel}` : "Agent 任务过程",
     intentLabel,
+    actionLabel,
+    domainLabel,
+    outputLabel,
+    contextScopes: Array.isArray(contextPlan.scopes) ? contextPlan.scopes : (metadata.agent_context_scopes || []),
     confidence,
     executionMode,
     responseMode,
-    policyReason: policy.reason || "",
+    policyReason: policy.reason || contextPlan.reason || "",
     intentReason: intent.reason || "",
     tools: tools.length ? tools : (metadata.agent_tools || []).map((name) => ({ name, status: "ready" }))
   };
@@ -5570,15 +5581,19 @@ function normalizeAgentTrace(item = {}) {
 function renderAgentTraceBar(trace, steps = []) {
   const chips = [];
   if (trace.intentLabel) chips.push(["意图", trace.intentLabel]);
+  if (trace.actionLabel) chips.push(["动作", trace.actionLabel]);
+  if (trace.domainLabel) chips.push(["领域", trace.domainLabel]);
   if (trace.confidence) chips.push(["置信度", `${Math.round(trace.confidence * 100)}%`]);
   if (trace.executionMode) chips.push(["模式", trace.executionMode === "background" ? "后台完整生成" : "同步回答"]);
-  if (trace.responseMode) chips.push(["呈现", trace.responseMode === "document_card" ? "文档卡片" : trace.responseMode === "image_job" ? "图片任务" : "文本回答"]);
+  if (trace.outputLabel || trace.responseMode) chips.push(["呈现", trace.outputLabel || (trace.responseMode === "document_card" ? "文档卡片" : trace.responseMode === "image_job" ? "图片任务" : "文本回答")]);
+  const contextScopes = (trace.contextScopes || []).map(formatAgentContextScope).filter(Boolean);
   const toolNames = trace.tools.map((tool) => tool.name).filter(Boolean);
   const reason = trace.policyReason || trace.intentReason || "";
   return `
     <div class="agentTraceBar">
       <div class="agentTraceChips">
         ${chips.map(([label, value]) => `<span><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>`).join("")}
+        ${contextScopes.length ? `<span><b>上下文</b>${escapeHtml(contextScopes.join(" · "))}</span>` : ""}
         ${toolNames.length ? `<span><b>工具</b>${escapeHtml(toolNames.join(" · "))}</span>` : ""}
       </div>
       <div class="agentTraceProgress" aria-hidden="true">
@@ -5587,6 +5602,20 @@ function renderAgentTraceBar(trace, steps = []) {
       ${reason ? `<p>${escapeHtml(reason)}</p>` : ""}
     </div>
   `;
+}
+
+function formatAgentContextScope(scope = "") {
+  return {
+    current_message: "当前输入",
+    conversation_history: "会话历史",
+    default_workspace: "默认工作台",
+    selected_customer: "选中客户",
+    customer_collection: "客户集合",
+    attachments: "上传文件",
+    skill_manifest: "Skill",
+    knowledge_base: "知识库",
+    web: "联网"
+  }[scope] || scope;
 }
 
 function buildSkillResultCard(record, session, customerId = "") {

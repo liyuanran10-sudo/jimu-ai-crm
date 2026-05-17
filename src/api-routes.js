@@ -219,10 +219,15 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       });
       return true;
     }
+    const agentDecision = buildAgentDecision({ body: streamBody, db: authDb, user: actor.user });
     const processPlan = mergeAgentDecisionIntoProcessPlan(
-      buildChatProcessPlan({ body: streamBody, db: authDb }),
-      buildAgentDecision({ body: streamBody, db: authDb, user: actor.user })
+      buildChatProcessPlan({ body: streamBody, db: authDb, agentDecision }),
+      agentDecision
     );
+    const generationExtraContext = {
+      ...(streamBody.extraContext || {}),
+      agentDecision: processPlan.agentDecision || agentDecision
+    };
     if (processPlan.metadata.complexity === "simple") {
       const simpleAnswer = buildSimpleChatAnswer(streamBody, authDb);
       await streamSseText(simpleAnswer, send, "answer_delta");
@@ -375,7 +380,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
         skillId: "",
         userId: actor.user.id,
         message: streamBody.message,
-        extraContext: streamBody.extraContext,
+        extraContext: generationExtraContext,
         reason: "长文档已转入后台生成，避免 Netlify 同步函数超时。完成后会在帮助中心提醒。"
       });
       pendingGeneration.inputContext = {
@@ -394,6 +399,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
           customerId: "",
           skillId: "",
           userId: streamBody.userId || actor.user.id,
+          extraContext: generationExtraContext,
           saveToCustomer: false
         }, actor, pendingGeneration);
         return { record, memory: null };
@@ -407,7 +413,8 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
           type: "requirement_document",
           customerId: "",
           skillId: "",
-          userId: streamBody.userId || actor.user.id
+          userId: streamBody.userId || actor.user.id,
+          extraContext: generationExtraContext
         },
         actorUser: actor.user,
         config
@@ -436,7 +443,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
         skillId: "",
         userId: actor.user.id,
         message: streamBody.message,
-        extraContext: streamBody.extraContext,
+        extraContext: generationExtraContext,
         reason: "完整回答已转入后台生成，避免线上同步函数超时。完成后会在帮助中心提醒。"
       });
       pendingGeneration.inputContext = {
@@ -455,6 +462,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
           customerId: "",
           skillId: "",
           userId: streamBody.userId || actor.user.id,
+          extraContext: generationExtraContext,
           saveToCustomer: false
         }, actor, pendingGeneration);
         return { record, memory: null };
@@ -468,7 +476,8 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
           type: "chat",
           customerId: "",
           skillId: "",
-          userId: streamBody.userId || actor.user.id
+          userId: streamBody.userId || actor.user.id,
+          extraContext: generationExtraContext
         },
         actorUser: actor.user,
         config
@@ -493,6 +502,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       const customer = streamBody.customerId ? authDb.customers.find((item) => item.id === streamBody.customerId) || null : null;
       const generationBody = buildGenerationRequestBody(authDb, {
         ...streamBody,
+        extraContext: generationExtraContext,
         type: resolveRemoteDefaultWorkspaceGenerationType(streamBody, processPlan)
       }, customer, actor.user);
       const pendingGeneration = buildPendingBackgroundGeneration({
@@ -502,7 +512,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
         skillId: generationBody.skillId || streamBody.skillId || "",
         userId: generationBody.userId || actor.user.id,
         message: generationBody.message || streamBody.message,
-        extraContext: generationBody.extraContext || streamBody.extraContext,
+        extraContext: generationBody.extraContext || generationExtraContext,
         reason: customer
           ? "当前客户对话已提交后台远程生成，完成后会在帮助中心提醒。"
           : "当前对话已提交后台远程生成，完成后会在帮助中心提醒。"
@@ -561,7 +571,7 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       skillId: streamBody.skillId,
       userId: streamBody.userId || actor.user.id,
       message: streamBody.message,
-      extraContext: streamBody.extraContext,
+      extraContext: generationExtraContext,
       modelId: streamBody.modelId,
       config: streamConfig,
       onStatus: () => {},
@@ -2449,7 +2459,7 @@ function buildImagePromptFailureMarkdown({ title, reason, generationType }) {
   ].join("\n");
 }
 
-function buildChatProcessPlan({ body = {}, db }) {
+function buildChatProcessPlan({ body = {}, db, agentDecision = null }) {
   const message = String(body.message || "").trim();
   const customer = body.customerId ? db.customers.find((item) => item.id === body.customerId) || null : null;
   const rawSkill = body.skillId ? db.skills.find((item) => item.id === body.skillId && item.status !== "disabled") || null : null;
@@ -2458,10 +2468,12 @@ function buildChatProcessPlan({ body = {}, db }) {
     : null;
   const usesImage2 = !body.customerId && shouldRouteToImage2(body, db);
   const isSimple = !rawSkill && isSimpleChatQuery(message) && !usesImage2;
-  const defaultIntent = classifyDefaultWorkspaceIntent(message);
+  const defaultIntent = agentDecision
+    ? buildLegacyProcessIntentFromAgent(agentDecision, message)
+    : classifyDefaultWorkspaceIntent(message);
   const skill = isSimple ? null : rawSkill;
   const usedRag = Boolean(
-    /知识库|RAG|资料|案例|方案库|历史方案|文档|切片|检索/.test(message)
+    /知识库|RAG|资料库|参考资料|引用资料|案例库|历史案例|方案库|历史方案|切片|检索|根据资料|查资料/.test(message)
     || body.extraContext?.useKnowledgeBase
     || body.extraContext?.knowledgeBaseId
   );
@@ -2557,6 +2569,63 @@ function buildChatProcessPlan({ body = {}, db }) {
       buildProcessStep("step_3", "Scheduler 工具调度", "判断上下文与工具", defaultIntent?.toolHint || "按需调用默认 Agent、RAG、联网或 Skill 结果。"),
       buildProcessStep("step_4", "Executor/Reflector 输出", "生成并校验最终结果", "把过程收束为自然语言答案、表格、文档或下一步动作，并检查假设、风险和待确认信息。")
     ]
+  };
+}
+
+function buildLegacyProcessIntentFromAgent(agentDecision = {}, message = "") {
+  const routing = agentDecision.routing || {};
+  const actionKey = routing.action?.key || "";
+  if (["customer_analysis", "customer_talktrack"].includes(routing.intent)) {
+    return {
+      key: "customer_work",
+      label: routing.label || "客户推进任务",
+      reason: routing.reason || "输入要求结合客户数据进行分析或生成话术。",
+      outputHint: "调取 CRM 客户上下文，比较客户阶段、推进阻塞、下一步动作和推荐话术。",
+      toolHint: "读取客户档案、跟进记录、资料解析、客户记忆和历史 AI 输出。"
+    };
+  }
+  if (routing.intent === "document_generation" || actionKey === "write") {
+    return {
+      key: "document_generation",
+      label: routing.label || "文档生成",
+      reason: routing.reason || "输入明确要求生成可交付文档。",
+      outputHint: "按正式文档结构组织背景、目标、范围、功能、流程、风险和待确认事项。",
+      toolHint: "默认使用模型生成完整文档；只有明确要求资料、知识库或联网时才补充检索。"
+    };
+  }
+  if (routing.intent === "planning" || actionKey === "plan") {
+    return {
+      key: "planning",
+      label: routing.label || "规划拆解",
+      reason: routing.reason || "输入要求拆解计划、流程或执行路径。",
+      outputHint: "输出目标、阶段、任务清单、风险和验收标准。",
+      toolHint: "使用 Agent Planner 组织执行路径。"
+    };
+  }
+  if (routing.intent === "work_analysis") {
+    return {
+      key: "work_analysis",
+      label: routing.label || "工作分析",
+      reason: routing.reason || "输入要求分析或复盘当前工作。",
+      outputHint: "整理已完成、阻塞项、优先级和下一步动作。",
+      toolHint: "读取本轮对话和工作台上下文。"
+    };
+  }
+  if (routing.intent === "web_research") {
+    return {
+      key: "web_research",
+      label: routing.label || "联网调研",
+      reason: routing.reason || "输入需要最新公开信息或网页检索。",
+      outputHint: "输出来源明确的公开资料摘要。",
+      toolHint: "调用联网搜索工具，失败时转为模型回答并隐藏技术错误。"
+    };
+  }
+  return {
+    key: "general_chat",
+    label: "默认对话",
+    reason: routing.reason || "未命中强制 Skill、客户任务或明确交付物，按默认 AI 工作台直接回答。",
+    outputHint: "输出可直接使用的结论和下一步。",
+    toolHint: "默认不读取客户档案，保持全局工作台上下文。"
   };
 }
 
@@ -3597,8 +3666,8 @@ function buildDefaultGeneralChatMarkdown(message = "") {
 function isDefaultWorkspaceDocumentIntent(message = "") {
   const text = String(message || "").trim();
   if (!text) return false;
-  const documentTarget = /(需求文档|需求说明|需求清单|prd|产品需求|功能清单|业务清单|模块清单|方案|方案大纲|解决方案|报告|文档|PPT|ppt|结构稿|大纲|计划书|流程图|说明书|模板|话术|提示词)/i;
-  const documentAction = /(写|生成|出|做|整理|拟|起草|产出|给我|帮我|设计|规划|梳理|创建)/;
+  const documentTarget = /(需求文档|需求说明|需求清单|prd|产品需求文档|业务需求文档|业务清单|模块清单|方案文档|方案大纲|解决方案|正式方案|报告|文档|PPT|ppt|结构稿|计划书|流程图|说明书|SOP|sop|会议纪要|项目计划|交付文档)/i;
+  const documentAction = /(写|生成|输出|出一份|做一份|整理成|拟|起草|产出|形成|保存为|创建)/;
   return documentTarget.test(text) && documentAction.test(text);
 }
 
@@ -3672,6 +3741,25 @@ function emitAgentDecision(send, processPlan = {}) {
       label: routing.label || "",
       confidence: routing.confidence || 0,
       reason: routing.reason || ""
+    },
+    action: {
+      key: routing.action?.key || "",
+      label: routing.action?.label || "",
+      reason: routing.action?.reason || ""
+    },
+    domain: {
+      key: routing.domain?.key || "",
+      label: routing.domain?.label || ""
+    },
+    contextPlan: {
+      scopes: routing.contextPlan?.scopes || [],
+      customerBinding: routing.contextPlan?.customerBinding || "",
+      reason: routing.contextPlan?.reason || ""
+    },
+    output: {
+      mode: routing.output?.mode || "",
+      label: routing.output?.label || "",
+      reason: routing.output?.reason || ""
     },
     policy: {
       executionMode: policy.executionMode || "",
