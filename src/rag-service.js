@@ -304,8 +304,21 @@ function collectQueryText({ customer, skill, generationType, message, extraConte
     customer?.problemToSolve,
     customer?.existingSystem,
     customer?.knownRisks,
-    extraContext ? JSON.stringify(extraContext).slice(0, 2000) : ""
+    collectExtraQueryText(extraContext)
   ].filter(Boolean).join("\n");
+}
+
+function collectExtraQueryText(extraContext = {}) {
+  if (!extraContext || typeof extraContext !== "object") return "";
+  return [
+    extraContext.userIntent,
+    extraContext.ragQuery,
+    extraContext.knowledgeBaseQuery,
+    extraContext.webResearch,
+    ensureArray(extraContext.chatAttachments)
+      .map((item) => [item.fileName, item.name, item.parsedTextPreview, item.text].filter(Boolean).join(" "))
+      .join("\n")
+  ].filter(Boolean).join("\n").slice(0, 2000);
 }
 
 function collectKnowledgeChunks(db, knowledgeBaseIds) {
