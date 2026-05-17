@@ -40,7 +40,14 @@ export async function buildWebResearchContext({ db, customer, skill, generationT
   const results = [];
   const pages = [];
 
+  const weatherPage = await maybeBuildWeatherPage(plan.queries[0] || message, { timeoutMs }).catch((error) => {
+    errors.push(`天气查询暂时不可用：${cleanError(error.message)}`);
+    return null;
+  });
+  if (weatherPage) pages.push(weatherPage);
+
   for (const query of plan.queries) {
+    if (weatherPage && isWeatherQuery(query)) continue;
     try {
       const found = await searchWeb(query, {
         config,
@@ -139,13 +146,30 @@ export function buildResearchPlan({ db, customer, skill, generationType, message
 
 async function searchWeb(query, { config, timeoutMs, maxResults }) {
   const provider = String(config.webSearchProvider || "jina").toLowerCase();
+  const errors = [];
   if (provider === "tavily" && config.webSearchApiKey) {
-    return searchWithTavily(query, { apiKey: config.webSearchApiKey, timeoutMs, maxResults });
+    try {
+      const tavilyResults = await searchWithTavily(query, { apiKey: config.webSearchApiKey, timeoutMs, maxResults });
+      if (tavilyResults.length) return tavilyResults;
+    } catch (error) {
+      errors.push(error);
+    }
   }
 
-  const jinaResults = await searchWithJina(query, { timeoutMs, maxResults });
-  if (jinaResults.length) return jinaResults;
-  return searchWithDuckDuckGo(query, { timeoutMs, maxResults });
+  try {
+    const jinaResults = await searchWithJina(query, { timeoutMs, maxResults });
+    if (jinaResults.length) return jinaResults;
+  } catch (error) {
+    errors.push(error);
+  }
+
+  try {
+    return await searchWithDuckDuckGo(query, { timeoutMs, maxResults });
+  } catch (error) {
+    errors.push(error);
+  }
+
+  throw errors[0] || new Error("联网搜索源暂时不可用");
 }
 
 async function searchWithTavily(query, { apiKey, timeoutMs, maxResults }) {
@@ -274,6 +298,71 @@ async function fetchWithTimeout(url, options = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function maybeBuildWeatherPage(query = "", { timeoutMs }) {
+  if (!isWeatherQuery(query)) return null;
+  const city = extractWeatherCity(query);
+  if (!city) return null;
+  const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`;
+  const geoResponse = await fetchWithTimeout(geoUrl, { timeoutMs });
+  const geoPayload = await geoResponse.json();
+  const location = geoPayload?.results?.[0];
+  if (!location?.latitude || !location?.longitude) return null;
+  const weatherUrl = [
+    "https://api.open-meteo.com/v1/forecast",
+    `?latitude=${encodeURIComponent(location.latitude)}`,
+    `&longitude=${encodeURIComponent(location.longitude)}`,
+    "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+    "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+    "&forecast_days=1",
+    "&timezone=auto"
+  ].join("");
+  const weatherResponse = await fetchWithTimeout(weatherUrl, { timeoutMs });
+  const weather = await weatherResponse.json();
+  const current = weather.current || {};
+  const daily = weather.daily || {};
+  const text = [
+    `${location.name || city} 当前天气：${describeWeatherCode(current.weather_code)}。`,
+    `当前温度 ${formatWeatherValue(current.temperature_2m, "°C")}，体感 ${formatWeatherValue(current.apparent_temperature, "°C")}，湿度 ${formatWeatherValue(current.relative_humidity_2m, "%")}。`,
+    `风速 ${formatWeatherValue(current.wind_speed_10m, "km/h")}，当前降水 ${formatWeatherValue(current.precipitation, "mm")}。`,
+    `今日最高 ${formatWeatherValue(daily.temperature_2m_max?.[0], "°C")}，最低 ${formatWeatherValue(daily.temperature_2m_min?.[0], "°C")}，最大降水概率 ${formatWeatherValue(daily.precipitation_probability_max?.[0], "%")}。`,
+    `数据时间：${current.time || nowIso()}，来源：Open-Meteo。`
+  ].join("\n");
+  return {
+    url: weatherUrl,
+    title: `${location.name || city}今日天气`,
+    text,
+    source: "open-meteo"
+  };
+}
+
+function isWeatherQuery(query = "") {
+  return /(天气|气温|温度|下雨|降雨|风速|湿度|冷不冷|热不热)/.test(String(query || ""));
+}
+
+function extractWeatherCity(query = "") {
+  const text = String(query || "").replace(/\s+/g, "");
+  const matched = text.match(/([\u4e00-\u9fa5A-Za-z]{2,20})(?:今天|今日|现在|实时|明天|天气|气温|温度)/);
+  if (matched?.[1]) return matched[1].replace(/^(查询|查一下|看看|帮我|请问|一下)/, "");
+  return "";
+}
+
+function formatWeatherValue(value, unit) {
+  if (value === null || value === undefined || value === "") return "未知";
+  return `${value}${unit}`;
+}
+
+function describeWeatherCode(code) {
+  const normalized = Number(code);
+  if ([0].includes(normalized)) return "晴";
+  if ([1, 2, 3].includes(normalized)) return "多云";
+  if ([45, 48].includes(normalized)) return "有雾";
+  if ([51, 53, 55, 56, 57].includes(normalized)) return "毛毛雨";
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(normalized)) return "降雨";
+  if ([71, 73, 75, 77, 85, 86].includes(normalized)) return "降雪";
+  if ([95, 96, 99].includes(normalized)) return "雷雨";
+  return "天气状况待确认";
 }
 
 function buildQueries({ db, customer, skill, generationType, message, extraContext, toolType, text }) {
@@ -466,7 +555,10 @@ function unique(items) {
 }
 
 function cleanError(message) {
-  return String(message || "未知错误").replace(/sk-[^\s"'，。；、）)]+/g, "sk-***").slice(0, 180);
+  const text = String(message || "未知错误");
+  if (/HTTP\s*401|401|unauthorized|forbidden/i.test(text)) return "联网搜索源暂时不可用，系统已尝试备用源。";
+  if (/HTTP\s*429|rate limit|too many/i.test(text)) return "联网搜索源请求过多，稍后会自动恢复。";
+  return text.replace(/sk-[^\s"'，。；、）)]+/g, "sk-***").slice(0, 180);
 }
 
 function nowIso() {

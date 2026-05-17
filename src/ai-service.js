@@ -670,6 +670,7 @@ function shouldUseDirectWebResearchAnswer({ generationType, customer, context })
   if (generationType !== "chat") return false;
   if (customer) return false;
   if (!context?.webResearch?.used) return false;
+  if (!ensureArray(context.webResearch.results).length && !ensureArray(context.webResearch.pages).length) return false;
   const defaultAgent = context?.defaultAgent;
   const intents = ensureArray(defaultAgent?.router?.intents);
   const primaryIntent = String(defaultAgent?.router?.primaryIntent || "").trim();
@@ -704,13 +705,6 @@ function buildDirectWebResearchMarkdown({ message = "", context = {} }) {
     for (const page of pages.slice(0, 3)) {
       const summary = String(page.text || "").replace(/\s+/g, " ").slice(0, 220);
       lines.push(`- [${page.title || page.url}](${page.url})：${summary}`);
-    }
-    lines.push("");
-  }
-  if (webResearch.errors?.length) {
-    lines.push("## 联网提示");
-    for (const error of ensureArray(webResearch.errors).slice(0, 3)) {
-      lines.push(`- ${error}`);
     }
     lines.push("");
   }
@@ -1612,7 +1606,9 @@ function compactWebResearch(webResearch = {}, profile) {
       source: item.source,
       text: limitText(item.text, profile.webPageChars)
     })) : [],
-    errors: ensureArray(webResearch.errors).slice(0, 3).map((item) => limitText(item, 180))
+    errors: used && (webResearch.results?.length || webResearch.pages?.length)
+      ? ensureArray(webResearch.errors).slice(0, 3).map((item) => limitText(item, 180))
+      : []
   });
 }
 
@@ -2490,7 +2486,7 @@ function generateLocalMarkdown({ db, generationType, customer, skill, context, m
     ""
   ];
 
-  if (context.webResearch?.used) {
+  if (context.webResearch?.used && (context.webResearch.results?.length || context.webResearch.pages?.length)) {
     lines.push("## 联网资料参考");
     lines.push("");
     lines.push(renderWebResearchSection(context.webResearch));
@@ -2543,11 +2539,6 @@ function renderWebResearchSection(webResearch) {
     for (const page of webResearch.pages.slice(0, 3)) {
       lines.push(`- [${page.title || page.url}](${page.url})：${String(page.text || "").replace(/\s+/g, " ").slice(0, 180)}`);
     }
-  }
-  if (webResearch.errors?.length) {
-    lines.push("");
-    lines.push("联网工具提示：");
-    for (const error of webResearch.errors.slice(0, 3)) lines.push(`- ${error}`);
   }
   return lines.join("\n");
 }
