@@ -501,7 +501,7 @@ const OUTPUT_TOKEN_LIMITS = {
   demand_analysis: 2200,
   proposal_outline: 2800,
   failure_report: 2400,
-  chat: 2200,
+  chat: 4200,
   follow_summary: 900,
   interaction_image_prompt: 1200,
   interaction_image_drafts: 1800,

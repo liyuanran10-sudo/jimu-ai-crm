@@ -56,6 +56,9 @@ const GENERATION_LABELS_FOR_SYNC = {
 const BACKGROUND_AI_MODEL_NAME = "AI 后台生成中";
 const DEFAULT_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
 const LONG_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
+const MIN_BACKGROUND_REMOTE_TIMEOUT_MS = 120 * 1000;
+const BACKGROUND_CHAT_OUTPUT_TOKENS = 4200;
+const BACKGROUND_LONG_OUTPUT_TOKENS = 7200;
 const PPT_TASK_POLL_INTERVAL_MS = 8000;
 const PPT_TASK_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const pptTaskPollers = globalThis.__jimuCrmPptTaskPollers || new Map();
@@ -1464,6 +1467,7 @@ function queueCustomerHistoricalSolutionJob({ recordId, body, actorUser, config 
 
 async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
   const db = await readCrmDb();
+  const backgroundConfig = buildBackgroundGenerationConfig(config, body.type);
   console.info("crm background job read db", { recordId, type: body.type || "" });
   const actor = { user: actorUser };
   const customer = body.customerId ? db.customers.find((item) => item.id === body.customerId) : null;
@@ -1491,10 +1495,10 @@ async function runCrmGenerationJob({ recordId, body, actorUser, config }) {
       message: body.message,
       extraContext: body.extraContext,
       modelId: body.modelId,
-      config
+      config: backgroundConfig
     }),
-    getBackgroundAiJobTimeoutMs(body.type, config),
-    () => buildTimedOutGeneration({ db, body, customer, actorUser, config })
+    getBackgroundAiJobTimeoutMs(body.type, backgroundConfig),
+    () => buildTimedOutGeneration({ db, body, customer, actorUser, config: backgroundConfig })
   );
   const finishedAt = nowIso();
   const failed = isRemoteFailureMarkdown(generation.outputContent);
@@ -1632,6 +1636,7 @@ async function recoverStuckCrmGenerationJob(record) {
 
 async function runCustomerHistoricalSolutionJob({ recordId, body, actorUser, config }) {
   const db = await readCrmDb();
+  const backgroundConfig = buildBackgroundGenerationConfig(config, "historical_solution_entry");
   const actor = { user: actorUser };
   const customer = db.customers.find((item) => item.id === body.customerId);
   if (!customer) throw new Error("未找到当前客户，无法加入历史方案库");
@@ -1658,10 +1663,10 @@ async function runCustomerHistoricalSolutionJob({ recordId, body, actorUser, con
       message: body.message,
       extraContext: body.extraContext,
       modelId: body.modelId,
-      config
+      config: backgroundConfig
     }),
-    getBackgroundAiJobTimeoutMs("historical_solution_entry", config),
-    () => buildTimedOutGeneration({ db, body: { ...body, type: "historical_solution_entry" }, customer, actorUser, config })
+    getBackgroundAiJobTimeoutMs("historical_solution_entry", backgroundConfig),
+    () => buildTimedOutGeneration({ db, body: { ...body, type: "historical_solution_entry" }, customer, actorUser, config: backgroundConfig })
   );
   const finishedAt = nowIso();
   const failed = isRemoteFailureMarkdown(generation.outputContent);
@@ -5624,7 +5629,14 @@ function buildPendingBackgroundGeneration({ db, type, customer, skillId = "", us
     outputContent: [
       `# ${title}`,
       "",
-      `> ${reason || "后台生成中，请稍后在帮助中心查看结果。"}`
+      `> ${reason || "后台完整生成中，请稍后在帮助中心查看结果。"}`,
+      "",
+      "## 任务状态",
+      "",
+      "- 状态：已提交后台完整生成",
+      `- 最长等待：${Math.round(getBackgroundAiJobTimeoutMs(generationType) / 1000)} 秒`,
+      "- 生成期间可以继续对话，完成后会自动回填到当前对话和帮助中心。",
+      "- 后台会等待完整模型返回，不再因为前台 30 秒限制而截断。"
     ].join("\n"),
     createdAt: startedAt
   };
@@ -5991,6 +6003,21 @@ function getBackgroundAiJobTimeoutMs(type = "", config = {}) {
     return Math.max(Number(config.backgroundAiTimeoutMs || 0), LONG_BACKGROUND_AI_TIMEOUT_MS);
   }
   return Math.max(Number(config.backgroundAiTimeoutMs || 0), DEFAULT_BACKGROUND_AI_TIMEOUT_MS);
+}
+
+function buildBackgroundGenerationConfig(config = {}, type = "") {
+  const timeoutMs = getBackgroundAiJobTimeoutMs(type, config);
+  const remoteTimeoutMs = Math.min(
+    Math.max(Number(config.openaiTimeoutMs || 0), MIN_BACKGROUND_REMOTE_TIMEOUT_MS),
+    Math.max(30 * 1000, timeoutMs - 10 * 1000)
+  );
+  return {
+    ...config,
+    openaiTimeoutMs: remoteTimeoutMs,
+    aiOutputMaxTokens: Math.max(Number(config.aiOutputMaxTokens || 0), BACKGROUND_CHAT_OUTPUT_TOKENS),
+    aiLongReportMaxTokens: Math.max(Number(config.aiLongReportMaxTokens || 0), BACKGROUND_LONG_OUTPUT_TOKENS),
+    disableRemoteStreaming: true
+  };
 }
 
 function buildAsyncJobStep(id, title, status, summary, startedAt = nowIso()) {

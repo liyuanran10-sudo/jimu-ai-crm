@@ -6539,6 +6539,7 @@ body {
 .chatBubbleBody > .markdownPane,
 .chatBubbleBody > .finalAnswerPane,
 .chatBubbleBody > .chatProcessPanel,
+.chatBubbleBody > .chatBackgroundTask,
 .chatBubbleBody > .skillResultCard {
   max-width: 100%;
 }
@@ -8037,6 +8038,73 @@ body {
 .doubaoChatLayout .chatBubble.user > .chatBubbleBody {
   background: #1763f3;
   color: #ffffff;
+}
+
+.chatBackgroundTask {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 0 12px;
+  border: 1px solid rgba(23, 99, 243, 0.18);
+  border-radius: 16px;
+  padding: 14px;
+  background: #f8fbff;
+  color: #344054;
+  box-shadow: 0 14px 34px rgba(23, 99, 243, 0.08);
+}
+
+.chatBackgroundTask.completed {
+  border-color: rgba(18, 183, 106, 0.24);
+  background: #f6fcf8;
+}
+
+.chatBackgroundTask.failed {
+  border-color: rgba(240, 68, 56, 0.24);
+  background: #fffafa;
+}
+
+.chatBackgroundTaskHead {
+  display: grid;
+  gap: 4px;
+}
+
+.chatBackgroundTaskHead span {
+  color: var(--guardian-blue);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.chatBackgroundTaskHead strong {
+  color: #101828;
+  font-size: 15px;
+  font-weight: 950;
+  line-height: 1.35;
+}
+
+.chatBackgroundTask p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.chatBackgroundTask small {
+  color: #667085;
+  font-size: 12px;
+}
+
+.chatBackgroundTaskActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chatBackgroundTaskActions button {
+  min-height: 30px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .skillResultCard {

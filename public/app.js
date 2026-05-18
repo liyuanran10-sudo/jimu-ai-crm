@@ -3862,6 +3862,7 @@ async function submitChat(form) {
         recordId: data.record.id
       };
       if (isGeneratingJobStatus(getRecordJobStatus(data.record))) {
+        assistantMessage.backgroundTask = buildChatBackgroundTaskCard(data.record, data.generation);
         registerHelpCenterRecord(data.record.id, data.record);
       }
     }
@@ -3922,7 +3923,7 @@ function shouldRenderSkillResultCard({ skillId, record, toolMode, metadata = {} 
   if (!record?.id) return false;
   if (skillId) return true;
   if (metadata.agent_response_mode === "document_card" && metadata.used_skill) return true;
-  if (metadata.background_generation || metadata.queued_remote_generation) return true;
+  if ((metadata.background_generation || metadata.queued_remote_generation) && record.generationType !== "chat") return true;
   if (toolMode === "image2") return true;
   return record.generationType && record.generationType !== "chat";
 }
@@ -4785,6 +4786,13 @@ function hydrateChatMessagesFromRecords() {
         if (!record) continue;
         const status = getRecordJobStatus(record);
         const finalContent = String(record.outputContent || "");
+        if (message.backgroundTask || status === "generating" || message.recordId === record.id || message.meta?.recordId === record.id) {
+          const nextTask = buildChatBackgroundTaskCard(record);
+          if (JSON.stringify(message.backgroundTask || {}) !== JSON.stringify(nextTask || {})) {
+            message.backgroundTask = nextTask;
+            changed = true;
+          }
+        }
         if (finalContent && message.content !== finalContent && status !== "generating") {
           message.content = finalContent;
           changed = true;
@@ -5394,11 +5402,12 @@ function renderChatBubble(item, index, total = 0) {
   const isStreaming = Boolean(item.streaming);
   const hasCard = Boolean(item.skillCard);
   const isLatest = index === total - 1;
+  const isPendingBackgroundPlaceholder = item.backgroundTask?.status === "generating" && isBackgroundPlaceholderContent(item.content);
   const actions = [];
   if (isUser) {
     actions.push(`<button type="button" data-action="copy-last-message" data-index="${index}">复制</button>`);
   } else {
-    if (!isStreaming && String(item.content || "").trim()) {
+    if (!isStreaming && String(item.content || "").trim() && !isPendingBackgroundPlaceholder) {
       actions.push(`<button type="button" data-action="copy-last-message" data-index="${index}">复制全部</button>`);
     }
     if (isLatest && isStreaming) {
@@ -5407,7 +5416,7 @@ function renderChatBubble(item, index, total = 0) {
     if (isLatest && !isStreaming) {
       actions.push(`<button type="button" data-action="regenerate-last-message" data-index="${index}">重新生成</button>`);
     }
-    const canSave = !isStreaming && String(item.content || "").trim();
+    const canSave = !isStreaming && String(item.content || "").trim() && !isPendingBackgroundPlaceholder;
     if (canSave) {
       actions.push(`<button type="button" class="chatSaveSolutionButton" data-action="open-save-chat-solution-modal" data-index="${index}">保存为方案</button>`);
     }
@@ -5450,11 +5459,13 @@ function renderChatMessageBody(item) {
 
   const processHtml = renderChatProcessPanel(item);
   const evidenceHtml = renderChatEvidencePanel(item);
+  const taskHtml = renderChatBackgroundTaskCard(item);
   if (item.remoteFailure || isRemoteFailureContent(item.content)) {
     const failureHtml = renderChatRemoteFailure(item);
-    return item.streaming ? `${processHtml}${evidenceHtml}${failureHtml}` : `${processHtml}${evidenceHtml}${failureHtml}`;
+    return item.streaming ? `${processHtml}${evidenceHtml}${taskHtml}${failureHtml}` : `${processHtml}${evidenceHtml}${taskHtml}${failureHtml}`;
   }
-  const finalAnswer = String(item.content || "").trim()
+  const hidePlaceholder = item.backgroundTask?.status === "generating" && isBackgroundPlaceholderContent(item.content);
+  const finalAnswer = String(item.content || "").trim() && !hidePlaceholder
     ? `<div class="finalAnswerPane markdownPane chatMarkdown ${item.streaming ? "streamingMarkdown" : ""}">${markdownToHtml(item.content)}</div>`
     : "";
 
@@ -5465,9 +5476,53 @@ function renderChatMessageBody(item) {
     const status = item.content && item.status
       ? `<div class="streamStatus">${escapeHtml(item.status)}</div>`
       : "";
-    return `${processHtml}${evidenceHtml}${finalAnswer}${typing}${status}`;
+    return `${processHtml}${evidenceHtml}${taskHtml}${finalAnswer}${typing}${status}`;
   }
-  return `${processHtml}${evidenceHtml}${finalAnswer || `<div class="finalAnswerPane markdownPane chatMarkdown">${markdownToHtml("暂无内容")}</div>`}`;
+  return `${processHtml}${evidenceHtml}${taskHtml}${finalAnswer || (taskHtml ? "" : `<div class="finalAnswerPane markdownPane chatMarkdown">${markdownToHtml("暂无内容")}</div>`)}`;
+}
+
+function buildChatBackgroundTaskCard(record, generation = null) {
+  if (!record?.id) return null;
+  const status = normalizeHelpCenterStatus(getRecordJobStatus(record));
+  const output = String(record.outputContent || generation?.outputContent || "");
+  const steps = getRecordJobSteps(record);
+  return {
+    recordId: record.id,
+    title: record.title || generation?.title || generationTypes[record.generationType] || "AI 后台任务",
+    kindLabel: generationTypes[record.generationType] || "AI 生成",
+    status,
+    statusLabel: getRecordJobStatusLabel(status),
+    preview: buildHelpCenterPreview(output, status, record.generationType, "record"),
+    createdAt: record.createdAt || generation?.createdAt || "",
+    steps
+  };
+}
+
+function renderChatBackgroundTaskCard(item = {}) {
+  const task = item.backgroundTask;
+  if (!task?.recordId) return "";
+  const statusClass = task.status === "failed" ? "failed" : task.status === "completed" ? "completed" : "generating";
+  const activeStep = (task.steps || []).find((step) => ["running", "failed"].includes(step.status))
+    || [...(task.steps || [])].reverse().find((step) => step.status === "done")
+    || null;
+  return `
+    <article class="chatBackgroundTask ${statusClass}">
+      <div class="chatBackgroundTaskHead">
+        <span>${escapeHtml(task.kindLabel || "AI 生成")} · ${escapeHtml(task.statusLabel || "生成中")}</span>
+        <strong>${escapeHtml(task.title || "后台完整生成")}</strong>
+      </div>
+      <p>${escapeHtml(task.preview || "后台正在生成完整回答，完成后会自动回填到当前对话。")}</p>
+      ${activeStep ? `<small>${escapeHtml(activeStep.title || "任务过程")} · ${escapeHtml(getProcessStatusLabel(activeStep.status))}</small>` : ""}
+      <div class="chatBackgroundTaskActions">
+        <button type="button" class="ghostButton" data-action="open-help-center-item" data-kind="record" data-id="${escapeAttr(task.recordId)}">查看进度</button>
+        ${task.status !== "generating" ? `<button type="button" class="ghostButton" data-action="copy-history" data-id="${escapeAttr(task.recordId)}">复制结果</button>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function isBackgroundPlaceholderContent(text = "") {
+  return /后台完整生成|后台远程生成|后台生成中|后台任务|帮助中心提醒|已提交后台生成|已提交后台远程生成|完整回答已转入后台生成/.test(String(text || ""));
 }
 
 function renderChatEvidencePanel(item = {}) {
