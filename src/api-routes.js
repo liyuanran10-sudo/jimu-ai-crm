@@ -2738,7 +2738,14 @@ function shouldQueueServerlessDefaultGeneralChat(body = {}, processPlan = {}) {
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
   if (processPlan?.metadata?.agent_intent === "web_research" || (processPlan?.metadata?.agent_tools || []).includes("web.search")) return false;
-  return ["planning", "work_analysis"].includes(processPlan?.metadata?.default_intent);
+  const defaultIntent = processPlan?.metadata?.default_intent || "";
+  const agentIntent = processPlan?.metadata?.agent_intent || "";
+  const policyRequiresBackground = processPlan?.metadata?.agent_execution_mode === "background"
+    || processPlan?.metadata?.agent_response_mode === "background";
+  if (policyRequiresBackground && ["general_chat", "planning", "work_analysis"].includes(defaultIntent || agentIntent)) {
+    return true;
+  }
+  return ["planning", "work_analysis"].includes(defaultIntent);
 }
 
 function shouldUseServerlessQuickCustomerDocumentChat(body = {}, processPlan = {}) {
@@ -2799,7 +2806,9 @@ function buildServerlessDefaultWorkspaceChatGeneration({ db, body = {}, actor, p
         userGoal: message,
         generatedBy: actor.user.id,
         attachmentCount: attachmentContext.attachments.length,
-        note: "默认工作台快速路径，不读取任何客户档案。"
+        note: intent === "customer_work"
+          ? "默认工作台客户集合快速路径，读取当前用户可见的客户档案、跟进记录和历史输出。"
+          : "默认工作台快速路径，不读取任何客户档案。"
       }
     },
     outputContent: markdown,
@@ -3349,7 +3358,7 @@ function shouldAskForCustomerSelection(body = {}, referencedCustomer = null) {
   const text = String(body.message || "");
   if (isDefaultWorkspaceDocumentIntent(text)) return false;
   if (isDefaultWorkspaceCustomerPortfolioIntent(text)) return false;
-  const asksCustomerWork = /(这个客户|该客户|这个线索|该线索|这个商机|该商机|客户.*(跟进|推进|分析|复盘|成交|阶段|报价|下一步|话术|怎么说|发什么)|线索.*(跟进|推进|分析|话术)|商机.*(跟进|推进|分析|话术)|销售下一步|下一步怎么跟进|发什么话术|怎么跟客户说)/.test(text);
+  const asksCustomerWork = /(这个客户|该客户|这个线索|该线索|这个商机|该商机|客户.*(跟进|推进|分析|复盘|成交|阶段|报价|下一步|话术|怎么说|发什么|方案|材料|文档|报告|出什么)|线索.*(跟进|推进|分析|话术|方案)|商机.*(跟进|推进|分析|话术|方案)|销售下一步|下一步怎么跟进|发什么话术|怎么跟客户说)/.test(text);
   const hasNamedCustomer = /(客户[:：]|公司[:：]|项目[:：]|[\u4e00-\u9fa5A-Za-z0-9]{2,}(公司|项目|系统|平台|科技|集团|门店|学校|医院|工厂))/.test(text);
   return asksCustomerWork && !hasNamedCustomer;
 }
@@ -3365,7 +3374,7 @@ function classifyDefaultWorkspaceIntent(message = "") {
       toolHint: "读取 CRM 客户集合上下文，包含客户档案、跟进记录、资料解析、客户记忆和历史 AI 输出。"
     };
   }
-  if (/(跟进|推进|报价|复盘|成交|阶段|客户分析|线索分析|商机分析|话术|怎么说|发什么|沟通策略)/.test(text)) {
+  if (/(跟进|推进|报价|复盘|成交|阶段|客户分析|线索分析|商机分析|话术|怎么说|发什么|沟通策略|客户.{0,12}(方案|材料|文档|报告|出什么)|线索.{0,12}(方案|材料|文档|报告|出什么)|商机.{0,12}(方案|材料|文档|报告|出什么))/.test(text)) {
     return {
       key: "customer_work",
       label: "客户推进任务",
@@ -3414,7 +3423,7 @@ function isDefaultWorkspaceCustomerPortfolioIntent(message = "") {
   const text = String(message || "").trim();
   if (!text) return false;
   const mentionsCustomerGroup = /(我的|我手上|手上|当前|现在|名下|负责|这|这些|那几个|两个|2个|几个|所有).{0,10}(客户|线索|商机)|(客户|线索|商机).{0,10}(两个|2个|几个|这些|当前|现在|手上|名下|负责)/.test(text);
-  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么|话术|怎么说|发什么|沟通策略)/.test(text);
+  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么|要做什么|准备什么|话术|怎么说|发什么|沟通策略|方案|方案类型|解决方案|材料|文档|报告|出什么)/.test(text);
   return mentionsCustomerGroup && asksAnalysis;
 }
 
@@ -3494,6 +3503,7 @@ function buildDefaultCustomerPortfolioMarkdown({ db, actor, message = "" }) {
     const stageName = getStageName(db, customer.stage);
     const stallReasons = inferCustomerStallReasons({ customer, follows, latestGenerations, message });
     const nextActions = inferCustomerNextActions({ customer, follows, stageName });
+    const solutionTypes = inferCustomerSolutionTypeLines({ customer, follows, files, stageName, message });
     return [
       `## ${index + 1}. ${customer.name}`,
       "",
@@ -3517,6 +3527,10 @@ function buildDefaultCustomerPortfolioMarkdown({ db, actor, message = "" }) {
       `- 客户记忆：${memories.map((item) => stripMarkdown(item.content || item.title || "").slice(0, 180)).filter(Boolean).join("；") || "暂无客户记忆"}`,
       `- 资料解析：${files.map((file) => `${file.fileName}：${stripMarkdown(file.parsedText || "").slice(0, 180)}`).join("；") || "暂无已解析资料"}`,
       `- 历史 AI 输出：${latestGenerations.map((item) => `${item.title || GENERATION_LABELS_FOR_SYNC[item.generationType] || "AI 输出"}：${stripMarkdown(item.outputContent || "").slice(0, 180)}`).join("；") || "暂无历史 AI 输出"}`,
+      "",
+      "### 推荐方案类型",
+      "",
+      ...solutionTypes,
       "",
       "### 你分别要做什么",
       "",
@@ -3633,6 +3647,47 @@ function inferCustomerNextActions({ customer, follows = [], stageName = "" }) {
   }
   actions.push("- 本周只设一个明确推进目标：让客户确认下一次会议议题和需要谁参加。");
   return actions.slice(0, 4);
+}
+
+function inferCustomerSolutionTypeLines({ customer, follows = [], files = [], stageName = "", message = "" }) {
+  const stage = String(customer.stage || stageName || "");
+  const context = [
+    customer.customerType,
+    customer.demandDescription,
+    customer.background,
+    customer.problemToSolve,
+    customer.budgetInfo,
+    customer.decisionInfo,
+    follows.map((item) => item.content || item.customerFeedback || item.internalJudgement || item.nextAction).join("\n"),
+    files.map((file) => file.parsedText || "").join("\n"),
+    message
+  ].filter(Boolean).join("\n");
+  const lines = [];
+  if (/初步|接触|initial/i.test(stage)) {
+    lines.push("- 优先出「前期咨询回应策略 + 一页式轻量方案」：先帮客户看懂业务价值、一期范围和下一次沟通问题，不要直接做完整 PRD。");
+  } else if (/需求|沟通|demand/i.test(stage)) {
+    lines.push("- 优先出「需求澄清清单 + 轻量级解决方案」：把业务场景、角色、流程、数据来源、接口和验收口径先收敛。");
+  } else if (/方案|proposal/i.test(stage)) {
+    lines.push("- 优先出「正式方案大纲 + 报价前提说明」：突出模块边界、实施路径、交付物、报价假设和待客户确认事项。");
+  } else if (/商务|合同|报价|closing|contract/i.test(stage)) {
+    lines.push("- 优先出「商务确认方案」：围绕价格口径、交付范围、周期、付款节点和验收标准推进。");
+  } else if (/lost|失败/.test(stage + customer.status)) {
+    lines.push("- 优先出「失败复盘与唤醒方案」：先判断丢单原因、未来触发条件和是否值得二次激活。");
+  }
+  if (/AI|智能|CRM|销售|客户|线索|商机/i.test(context)) {
+    lines.push("- 内容形态建议用「业务痛点 - 目标场景 - 核心模块 - AI 能力 - 实施节奏 - 风险边界」六段式，销售拿去就能继续沟通。");
+  }
+  if (/接口|对接|数据|ERP|MES|第三方|微信|支付|飞书|企微/i.test(context)) {
+    lines.push("- 需要单独补一页「数据与接口确认清单」，否则客户后续很容易卡在技术可行性和报价边界。");
+  }
+  if (/预算|报价|价格|费用|成本/.test(context)) {
+    lines.push("- 如果客户已经关心预算，方案里要加「版本拆分」：MVP 轻量版、标准版、增强版，方便客户先选投入档位。");
+  }
+  if (!lines.length) {
+    lines.push("- 推荐先出「轻量级方案」：用一页说明客户现状、一期目标、核心功能、预期效果和下一步确认问题。");
+  }
+  lines.push("- 暂时不建议直接做大而全需求文档，除非客户已经确认预算、决策人、范围和验收口径。");
+  return Array.from(new Set(lines)).slice(0, 4);
 }
 
 function buildCustomerPriorityLines(db, customers = []) {

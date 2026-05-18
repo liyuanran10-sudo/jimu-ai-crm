@@ -296,7 +296,7 @@ function shouldUseRemoteModel(body = {}) {
 function isCustomerPortfolioIntent(message = "") {
   const text = String(message || "").trim();
   const mentionsCustomerGroup = /(我的|我手上|手上|当前|现在|名下|负责|这|这些|那几个|两个|2个|几个|所有).{0,10}(客户|线索|商机)|(客户|线索|商机).{0,10}(两个|2个|几个|这些|当前|现在|手上|名下|负责)/.test(text);
-  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么|话术|怎么说|发什么|沟通策略)/.test(text);
+  const asksAnalysis = /(分析|复盘|判断|看看|为什么|原因|推进|跟进|失败|卡住|停滞|没办法|无法|不能|下一步|分别|优先级|做什么|要做什么|准备什么|话术|怎么说|发什么|沟通策略|方案|方案类型|解决方案|材料|文档|报告|出什么)/.test(text);
   return mentionsCustomerGroup && asksAnalysis;
 }
 

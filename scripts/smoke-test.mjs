@@ -133,6 +133,20 @@ assert.equal(agentDecisionCustomer.routing.action.key, "analyze");
 assert.ok(agentDecisionCustomer.routing.contextPlan.scopes.includes("customer_collection"));
 assert.ok(agentDecisionCustomer.tools.some((tool) => tool.name === "crm.getCustomerContext"));
 
+const agentDecisionCustomerSolution = buildAgentDecision({
+  body: {
+    type: "chat",
+    message: "我应该给这两个客户出什么类型的方案",
+    modelId: "model_openai",
+    extraContext: { workspaceMode: "default_ai_workspace" }
+  },
+  db: bootstrap.body.db,
+  user: login.body.user
+});
+assert.equal(agentDecisionCustomerSolution.routing.intent, "customer_analysis");
+assert.equal(agentDecisionCustomerSolution.routing.action.key, "analyze");
+assert.ok(agentDecisionCustomerSolution.routing.contextPlan.scopes.includes("customer_collection"));
+
 const skillWithManifest = bootstrap.body.db.skills.find((skill) => /方案大纲/.test(skill.name || "")) || bootstrap.body.db.skills[0];
 const agentDecisionSkillManifest = buildAgentDecision({
   body: {
@@ -346,6 +360,32 @@ try {
     assert.equal(done.metadata?.serverless_fast_path, true);
     assert.notEqual(done.metadata?.background_generation, true);
     assert.match(done.generation.outputContent || "", /当前客户推进分析|优先级建议/);
+  });
+
+  await check("customer solution type question uses customer fast path", async () => {
+    const result = await withBackgroundJobStub(async () => captureStream({
+      body: {
+        type: "chat",
+        message: "我应该给这两个客户出什么类型的方案",
+        userId: "user_admin",
+        modelId: "model_openai",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    }));
+    assert.equal(result.statusCode, 200);
+    const agentDecision = getSseEvent(result.events, "agent_decision");
+    assert.equal(agentDecision?.intent?.key, "customer_analysis");
+    assert.equal(agentDecision?.action?.key, "analyze");
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.equal(done.generation.prompt, "serverless_default_workspace_fast_path");
+    assert.equal(done.metadata?.serverless_fast_path, true);
+    assert.notEqual(done.metadata?.background_generation, true);
+    assert.match(done.generation.outputContent || "", /当前客户推进分析|推荐方案类型/);
   });
 
   await check("company list question uses web research answer without remote model", async () => {
