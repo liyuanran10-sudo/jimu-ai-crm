@@ -388,6 +388,32 @@ try {
     assert.match(done.generation.outputContent || "", /当前客户推进分析|推荐方案类型/);
   });
 
+  await check("referenced customer in default workspace uses stable customer fast path", async () => {
+    const result = await withBackgroundJobStub(async () => captureStream({
+      body: {
+        type: "chat",
+        message: "华东制造 AI 质检项目 · IoT+AI · demand_deepening",
+        userId: "user_admin",
+        modelId: "model_openai",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    }));
+    assert.equal(result.statusCode, 200);
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.equal(done.generation.prompt, "serverless_referenced_customer_fast_path");
+    assert.equal(done.metadata?.serverless_fast_path, true);
+    assert.equal(done.metadata?.referenced_customer_fast_path, true);
+    assert.notEqual(done.metadata?.background_generation, true);
+    assert.notEqual(done.metadata?.queued_remote_generation, true);
+    assert.notEqual(done.record.inputContext?.asyncAiJob?.status, "generating");
+    assert.match(done.generation.outputContent || "", /华东制造 AI 质检项目 客户上下文分析|推荐方案类型|MVP/);
+  });
+
   await check("company list question uses web research answer without remote model", async () => {
     const result = await withWebResearchStub(async () => captureStream({
       body: {

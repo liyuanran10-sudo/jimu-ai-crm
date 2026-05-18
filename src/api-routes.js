@@ -377,6 +377,36 @@ export async function handleApiStreamRequest({ method, pathname, body = {}, head
       return true;
     }
 
+    if (shouldUseServerlessQuickReferencedCustomerChat(streamBody, processPlan)) {
+      const quickGeneration = buildServerlessReferencedCustomerChatGeneration({
+        db: authDb,
+        body: streamBody,
+        actor,
+        processPlan
+      });
+      emitProcessStep(send, processPlan.steps[2], "done");
+      emitProcessStep(send, processPlan.steps[3], "running");
+      const result = await withCrmDb((db) => {
+        const record = saveGenerationRecord(db, streamBody, actor, quickGeneration);
+        return { record, memory: null };
+      });
+      emitProcessStep(send, processPlan.steps[3], "done");
+      await streamSseText(quickGeneration.outputContent, send, "answer_delta");
+      send("done", {
+        ok: true,
+        generation: quickGeneration,
+        record: result.record,
+        memory: result.memory,
+        process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+        metadata: {
+          ...processPlan.metadata,
+          serverless_fast_path: true,
+          referenced_customer_fast_path: true
+        }
+      });
+      return true;
+    }
+
     if (shouldQueueServerlessDefaultDocumentChat(streamBody, processPlan)) {
       const pendingGeneration = buildPendingBackgroundGeneration({
         db: authDb,
@@ -2712,6 +2742,21 @@ function shouldUseServerlessQuickCustomerChat(body = {}, processPlan = {}) {
   return isCustomerQuickAnalysisIntent(message);
 }
 
+function shouldUseServerlessQuickReferencedCustomerChat(body = {}, processPlan = {}) {
+  if (!isServerlessRuntime()) return false;
+  if (String(body.type || "chat") !== "chat") return false;
+  if (body.customerId) return false;
+  if (!body.extraContext?.referencedCustomerId) return false;
+  if (body.skillId) return false;
+  if (String(body.modelId || "") === "model_local") return false;
+  if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
+  if (processPlan?.metadata?.image_job) return false;
+  if (processPlan?.metadata?.used_skill || processPlan?.metadata?.used_tool || processPlan?.metadata?.used_rag) return false;
+  if (Array.isArray(body.extraContext?.chatAttachments) && body.extraContext.chatAttachments.length) return false;
+  if (isDefaultWorkspaceDocumentIntent(body.message)) return false;
+  return true;
+}
+
 function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
   if (String(body.type || "chat") !== "chat") return false;
@@ -3319,6 +3364,144 @@ function buildServerlessQuickCustomerChatGeneration({ db, body, actor, processPl
         customerName: customer?.name || "",
         stage: stageName,
         generatedBy: actor.user.id
+      }
+    },
+    outputContent: markdown,
+    createdAt: nowIso()
+  };
+}
+
+function buildServerlessReferencedCustomerChatGeneration({ db, body, actor, processPlan }) {
+  const customer = db.customers.find((item) => item.id === body.extraContext?.referencedCustomerId) || null;
+  const follows = customer
+    ? db.followRecords
+      .filter((item) => item.customerId === customer.id)
+      .sort((a, b) => new Date(b.followTime || b.createdAt || 0) - new Date(a.followTime || a.createdAt || 0))
+      .slice(0, 5)
+    : [];
+  const latestGenerations = customer
+    ? db.aiGenerationRecords
+      .filter((item) => item.customerId === customer.id)
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      .slice(0, 2)
+    : [];
+  const memories = customer
+    ? db.customerMemories
+      .filter((item) => item.customerId === customer.id && item.status !== "disabled")
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+      .slice(0, 2)
+    : [];
+  const files = customer
+    ? db.customerFiles
+      .filter((item) => item.customerId === customer.id && item.parsedText)
+      .slice(0, 2)
+    : [];
+  const stageName = customer ? getStageName(db, customer.stage) : "待确认";
+  const message = String(body.message || "").trim();
+  const customerDemand = firstNonEmpty([
+    customer?.demandDescription,
+    customer?.problemToSolve,
+    customer?.background,
+    customer?.internalNotes
+  ]) || "客户需求尚未补充完整。";
+  const stallReasons = customer
+    ? inferCustomerStallReasons({ customer, follows, latestGenerations, message })
+    : ["- 未找到客户档案，请先确认客户名称。"];
+  const nextActions = customer
+    ? inferCustomerNextActions({ customer, follows, stageName })
+    : ["- 先确认客户名称，再补充需求、预算、决策链和下一步时间。"];
+  const solutionTypes = customer
+    ? inferCustomerSolutionTypeLines({ customer, follows, files, stageName, message })
+    : ["- 推荐先出轻量级方案，确认客户真实需求后再深化。"];
+  const followSummary = summarizeRecentFollowRecords(follows) || "- 暂无可用跟进记录。";
+  const memorySummary = memories
+    .map((item) => `- ${stripMarkdown(item.content || item.title || "").slice(0, 220)}`)
+    .filter((line) => line.length > 2)
+    .join("\n") || "- 暂无客户记忆。";
+  const fileSummary = files
+    .map((file) => `- ${file.fileName}：${stripMarkdown(file.parsedText || "").slice(0, 220)}`)
+    .join("\n") || "- 暂无已解析客户资料。";
+  const latestAiSummary = latestGenerations
+    .map((item) => `- ${item.title || GENERATION_LABELS_FOR_SYNC[item.generationType] || "AI 输出"}：${stripMarkdown(item.outputContent || "").slice(0, 220)}`)
+    .join("\n") || "- 暂无历史 AI 输出。";
+
+  const markdown = [
+    `# ${customer?.name || "客户"} 客户上下文分析`,
+    "",
+    `> 已在默认 AI 工作台命中客户「${customer?.name || body.extraContext?.referencedCustomerName || "待确认"}」。本次直接读取该客户档案、跟进记录、资料解析和历史输出，走稳定快速路径，不再让前台等待远程模型导致 504。`,
+    "",
+    "## 结论",
+    "",
+    `这个客户当前处于 **${stageName}**，类型是 **${customer?.customerType || "待确认"}**。建议先把需求深化为可验证的一期 MVP，不要直接做大而全方案。`,
+    "",
+    "## 客户关键事实",
+    "",
+    `- 客户/项目：${customer?.name || "待确认"}`,
+    `- 联系人：${customer?.contactName || "待确认"}`,
+    `- 当前阶段：${stageName}`,
+    `- 预算信息：${customer?.budgetInfo || "待确认"}`,
+    `- 决策信息：${customer?.decisionInfo || "待确认"}`,
+    `- 当前下一步：${customer?.nextAction || "待确认"}`,
+    `- 核心需求：${customerDemand}`,
+    "",
+    "## 为什么现在容易卡住",
+    "",
+    ...stallReasons,
+    "",
+    "## 推荐方案类型",
+    "",
+    ...solutionTypes,
+    "",
+    "## 你现在应该推进什么",
+    "",
+    ...nextActions,
+    "",
+    "## 可用上下文",
+    "",
+    "### 最近跟进",
+    "",
+    followSummary,
+    "",
+    "### 客户资料",
+    "",
+    fileSummary,
+    "",
+    "### 客户记忆",
+    "",
+    memorySummary,
+    "",
+    "### 历史 AI 输出",
+    "",
+    latestAiSummary,
+    "",
+    "## 下一轮可以直接让我生成",
+    "",
+    "- 需求深化会议提纲。",
+    "- MVP 检测范围与样本要求清单。",
+    "- 给陈总的微信跟进话术。",
+    "- 轻量级解决方案或 PPT 结构稿。"
+  ].join("\n");
+
+  return {
+    title: `${customer?.name || "客户"} - 默认 AI 对话`,
+    generationType: "chat",
+    skillId: "",
+    modelName: "AICRM 客户上下文快速生成",
+    prompt: "serverless_referenced_customer_fast_path",
+    inputContext: {
+      messageType: "ai_response",
+      process: processPlan.steps.map((step) => ({ ...step, status: "done" })),
+      metadata: {
+        ...processPlan.metadata,
+        serverless_fast_path: true,
+        referenced_customer_fast_path: true
+      },
+      referencedCustomer: {
+        customerId: customer?.id || body.extraContext?.referencedCustomerId || "",
+        customerName: customer?.name || body.extraContext?.referencedCustomerName || "",
+        stage: stageName,
+        generatedBy: actor.user.id,
+        originalMessage: message
       }
     },
     outputContent: markdown,
