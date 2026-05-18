@@ -57,6 +57,8 @@ const BACKGROUND_AI_MODEL_NAME = "AI 后台生成中";
 const DEFAULT_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
 const LONG_BACKGROUND_AI_TIMEOUT_MS = 360 * 1000;
 const MIN_BACKGROUND_REMOTE_TIMEOUT_MS = 120 * 1000;
+const CHAT_BACKGROUND_AI_TIMEOUT_MS = 150 * 1000;
+const LONG_BACKGROUND_REMOTE_TIMEOUT_MS = 240 * 1000;
 const BACKGROUND_CHAT_OUTPUT_TOKENS = 4200;
 const BACKGROUND_LONG_OUTPUT_TOKENS = 7200;
 const PPT_TASK_POLL_INTERVAL_MS = 8000;
@@ -5999,6 +6001,9 @@ function getBackgroundAiJobTimeoutMs(type = "", config = {}) {
   if (generationType === "lightweight_solution_ppt") {
     return Math.max(Number(config.pptTaskTimeoutMs || 0), PPT_TASK_POLL_TIMEOUT_MS);
   }
+  if (generationType === "chat") {
+    return CHAT_BACKGROUND_AI_TIMEOUT_MS;
+  }
   if (["chat", "historical_solution_entry", "consultation_advice", "solution_deepening", "lightweight_solution", "requirement_document"].includes(generationType)) {
     return Math.max(Number(config.backgroundAiTimeoutMs || 0), LONG_BACKGROUND_AI_TIMEOUT_MS);
   }
@@ -6006,9 +6011,13 @@ function getBackgroundAiJobTimeoutMs(type = "", config = {}) {
 }
 
 function buildBackgroundGenerationConfig(config = {}, type = "") {
+  const generationType = normalizeBackgroundGenerationType(type);
   const timeoutMs = getBackgroundAiJobTimeoutMs(type, config);
+  const targetRemoteTimeoutMs = generationType === "chat"
+    ? MIN_BACKGROUND_REMOTE_TIMEOUT_MS
+    : LONG_BACKGROUND_REMOTE_TIMEOUT_MS;
   const remoteTimeoutMs = Math.min(
-    Math.max(Number(config.openaiTimeoutMs || 0), MIN_BACKGROUND_REMOTE_TIMEOUT_MS),
+    targetRemoteTimeoutMs,
     Math.max(30 * 1000, timeoutMs - 10 * 1000)
   );
   return {
