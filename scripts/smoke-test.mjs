@@ -322,6 +322,32 @@ try {
     assert.ok(String(done.generation.outputContent || "").length > 120);
   });
 
+  await check("default workspace customer portfolio uses stable fast path without feature flag", async () => {
+    const result = await withBackgroundJobStub(async () => captureStream({
+      body: {
+        type: "chat",
+        message: "我目前的两个客户应该如何推进",
+        userId: "user_admin",
+        modelId: "model_openai",
+        extraContext: {
+          workspaceMode: "default_ai_workspace"
+        }
+      },
+      headers: { "x-crm-token": login.body.token },
+      config
+    }));
+    assert.equal(result.statusCode, 200);
+    const agentDecision = getSseEvent(result.events, "agent_decision");
+    assert.equal(agentDecision?.intent?.key, "customer_talktrack");
+    assert.equal(agentDecision?.action?.key, "analyze");
+    const done = getSseEvent(result.events, "done");
+    assert.ok(done?.generation);
+    assert.equal(done.generation.prompt, "serverless_default_workspace_fast_path");
+    assert.equal(done.metadata?.serverless_fast_path, true);
+    assert.notEqual(done.metadata?.background_generation, true);
+    assert.match(done.generation.outputContent || "", /当前客户推进分析|优先级建议/);
+  });
+
   await check("company list question uses web research answer without remote model", async () => {
     const result = await withWebResearchStub(async () => captureStream({
       body: {

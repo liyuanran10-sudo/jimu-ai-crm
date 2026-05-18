@@ -2707,13 +2707,13 @@ function shouldUseServerlessQuickCustomerChat(body = {}, processPlan = {}) {
 
 function shouldUseServerlessQuickDefaultWorkspaceChat(body = {}, processPlan = {}) {
   if (!isServerlessRuntime()) return false;
-  if (!isServerlessChatFastPathEnabled()) return false;
   if (String(body.type || "chat") !== "chat") return false;
   if (body.customerId) return false;
   if (body.skillId) return false;
   if (body.toolMode || body.extraContext?.toolMode === "image2") return false;
   if (processPlan?.metadata?.image_job) return false;
-  return processPlan?.metadata?.default_intent === "customer_work";
+  if (processPlan?.metadata?.default_intent === "customer_work") return true;
+  return isServerlessChatFastPathEnabled() && processPlan?.metadata?.default_intent === "general_chat";
 }
 
 function shouldQueueServerlessDefaultDocumentChat(body = {}, processPlan = {}) {
